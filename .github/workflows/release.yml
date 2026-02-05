@@ -1,0 +1,123 @@
+name: Create Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: 'Release type'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      release_notes:
+        description: 'Release notes'
+        required: false
+        default: 'Weekly database update with latest cloud pricing and resource mappings'
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Need full history for version tags
+    
+    - name: Get latest version
+      id: get_version
+      run: |
+        # Get the latest tag
+        LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+        echo "Latest tag: $LATEST_TAG"
+        
+        # Parse version components
+        VERSION=${LATEST_TAG#v}
+        IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+        
+        # Increment based on release type
+        case "${{ github.event.inputs.release_type }}" in
+          major)
+            MAJOR=$((MAJOR + 1))
+            MINOR=0
+            PATCH=0
+            ;;
+          minor)
+            MINOR=$((MINOR + 1))
+            PATCH=0
+            ;;
+          patch)
+            PATCH=$((PATCH + 1))
+            ;;
+        esac
+        
+        NEW_VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+        echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+        echo "New version: $NEW_VERSION"
+    
+    - name: Generate comprehensive release notes
+      run: |
+        cat > RELEASE_NOTES.md << 'EOF'
+        # Cloud Rosetta Database Release ${{ steps.get_version.outputs.new_version }}
+        
+        Released: $(date +"%B %d, %Y")
+        
+        ## What's New
+        
+        ${{ github.event.inputs.release_notes }}
+        
+        ## Database Statistics
+        
+        EOF
+        
+        # Append current stats
+        cat db/STATS.md >> RELEASE_NOTES.md
+        
+        # Add download section
+        cat >> RELEASE_NOTES.md << 'EOF'
+        
+        ## Download
+        
+        ### Direct Downloads
+        - [cloud_rosetta.db](https://github.com/gordonmurray/cloud-rosetta/releases/download/${{ steps.get_version.outputs.new_version }}/cloud_rosetta.db) - SQLite database
+        - [cloud_rosetta.db.sha256](https://github.com/gordonmurray/cloud-rosetta/releases/download/${{ steps.get_version.outputs.new_version }}/cloud_rosetta.db.sha256) - Checksum
+        
+        ### Using with Rosetta CLI
+        ```bash
+        # The CLI will auto-download this version
+        rosetta --provider aws
+        
+        # Or force update to this specific version
+        rosetta --update
+        ```
+        
+        ### Verify Integrity
+        ```bash
+        sha256sum -c cloud_rosetta.db.sha256
+        ```
+        EOF
+    
+    - name: Generate checksums
+      run: |
+        sha256sum db/cloud_rosetta.db > db/cloud_rosetta.db.sha256
+        
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.get_version.outputs.new_version }}
+        name: Release ${{ steps.get_version.outputs.new_version }}
+        body_path: RELEASE_NOTES.md
+        draft: false
+        prerelease: false
+        files: |
+          db/cloud_rosetta.db
+          db/cloud_rosetta.db.sha256
+          db/STATS.md
+    
+    - name: Update latest tag
+      run: |
+        git tag -f latest
+        git push origin latest --force

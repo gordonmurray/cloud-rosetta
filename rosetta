@@ -1,0 +1,468 @@
+#!/usr/bin/env python3
+"""
+Rosetta - Universal Cloud Cost Estimator
+GitHub-hosted version with automatic database updates
+"""
+
+import os
+import sys
+import json
+import argparse
+import subprocess
+import tempfile
+import shutil
+import logging
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional, Dict, Any
+import urllib.request
+import urllib.error
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger('rosetta')
+
+# Configuration
+GITHUB_REPO = "gordonmurray/cloud-rosetta"
+GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/db/cloud_rosetta.db"
+GITHUB_RELEASE_URL = f"https://github.com/{GITHUB_REPO}/releases/latest/download/cloud_rosetta.db"
+GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+
+# Local cache
+LOCAL_CACHE_DIR = Path.home() / ".rosetta"
+LOCAL_DB_PATH = LOCAL_CACHE_DIR / "cloud_rosetta.db"
+LOCAL_VERSION_PATH = LOCAL_CACHE_DIR / "version.txt"
+DB_MAX_AGE_HOURS = 24  # Re-download if older than this
+
+class RosettaCLI:
+    def __init__(self, repo_override: Optional[str] = None):
+        try:
+            if repo_override:
+                global GITHUB_REPO, GITHUB_RAW_URL, GITHUB_RELEASE_URL, GITHUB_API_URL
+                GITHUB_REPO = repo_override
+                GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/db/cloud_rosetta.db"
+                GITHUB_RELEASE_URL = f"https://github.com/{GITHUB_REPO}/releases/latest/download/cloud_rosetta.db"
+                GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+                logger.info(f"Using repository: {GITHUB_REPO}")
+            
+            self.LOCAL_CACHE_DIR = LOCAL_CACHE_DIR
+            self.LOCAL_DB_PATH = LOCAL_DB_PATH
+            self.ensure_cache_dir()
+        except Exception as e:
+            logger.error(f"Failed to initialize RosettaCLI: {e}")
+            raise
+    
+    def ensure_cache_dir(self):
+        """Create cache directory if it doesn't exist"""
+        try:
+            self.LOCAL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            logger.debug(f"Cache directory ensured: {self.LOCAL_CACHE_DIR}")
+        except Exception as e:
+            logger.error(f"Failed to create cache directory: {e}")
+            raise
+    
+    def get_db_age_hours(self) -> float:
+        """Get age of local database in hours"""
+        if not self.LOCAL_DB_PATH.exists():
+            return float('inf')
+        
+        mod_time = datetime.fromtimestamp(self.LOCAL_DB_PATH.stat().st_mtime)
+        age = datetime.now() - mod_time
+        return age.total_seconds() / 3600
+    
+    def get_latest_version(self) -> Optional[str]:
+        """Get the latest release version from GitHub"""
+        try:
+            logger.debug(f"Fetching latest version from {GITHUB_API_URL}")
+            with urllib.request.urlopen(GITHUB_API_URL, timeout=5) as response:
+                data = json.loads(response.read())
+                version = data.get('tag_name', 'unknown')
+                logger.debug(f"Latest version: {version}")
+                return version
+        except urllib.error.HTTPError as e:
+            logger.warning(f"HTTP error fetching version: {e.code}")
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to get latest version: {e}")
+            return None
+    
+    def download_database(self, force: bool = False) -> bool:
+        """Download the latest database from GitHub"""
+        
+        # Check if we need to update
+        if not force and self.get_db_age_hours() < DB_MAX_AGE_HOURS:
+            age_hours = self.get_db_age_hours()
+            logger.info(f"Using cached database (age: {age_hours:.1f} hours)")
+            print(f"Using cached database (age: {age_hours:.1f} hours)", file=sys.stderr)
+            return True
+        
+        logger.info(f"Fetching latest database from GitHub ({GITHUB_REPO})")
+        print(f"Fetching latest database from GitHub ({GITHUB_REPO})...", file=sys.stderr)
+        
+        # Check latest version
+        latest_version = self.get_latest_version()
+        if latest_version:
+            print(f"  Latest release: {latest_version}", file=sys.stderr)
+        
+        # Try different GitHub URLs in order of preference
+        urls = [
+            ("GitHub Release", GITHUB_RELEASE_URL),
+            ("GitHub Raw", GITHUB_RAW_URL),
+        ]
+        
+        for source, url in urls:
+            try:
+                print(f"  -> Trying {source}...", file=sys.stderr)
+                
+                # Download to temp file
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.db') as tmp_file:
+                    with urllib.request.urlopen(url, timeout=30) as response:
+                        # Stream download with progress
+                        total_size = int(response.headers.get('Content-Length', 0))
+                        downloaded = 0
+                        block_size = 8192
+                        
+                        while True:
+                            buffer = response.read(block_size)
+                            if not buffer:
+                                break
+                            downloaded += len(buffer)
+                            tmp_file.write(buffer)
+                            
+                            # Show progress
+                            if total_size > 0:
+                                percent = (downloaded / total_size) * 100
+                                print(f"\r  -> Downloading: {percent:.1f}% ({downloaded:,} bytes)", 
+                                      end='', file=sys.stderr)
+                        
+                        print(file=sys.stderr)  # New line after progress
+                        tmp_path = tmp_file.name
+                
+                # Verify it's a valid SQLite database
+                import sqlite3
+                try:
+                    conn = sqlite3.connect(tmp_path)
+                    cursor = conn.cursor()
+                    
+                    # Check database validity
+                    cursor.execute("""
+                        SELECT COUNT(*) FROM sqlite_master 
+                        WHERE type='table' AND name='resource_mappings'
+                    """)
+                    if cursor.fetchone()[0] == 0:
+                        raise ValueError("Invalid database structure")
+                    
+                    # Get stats
+                    cursor.execute("SELECT COUNT(*) FROM resource_mappings")
+                    mappings_count = cursor.fetchone()[0]
+                    
+                    cursor.execute("SELECT COUNT(*) FROM instance_types")
+                    instances_count = cursor.fetchone()[0]
+                    
+                    # Get version if available
+                    try:
+                        cursor.execute("""
+                            SELECT version, updated_at FROM db_version 
+                            ORDER BY id DESC LIMIT 1
+                        """)
+                        version_info = cursor.fetchone()
+                        version = version_info[0] if version_info else "unknown"
+                    except:
+                        version = "unknown"
+                    
+                    conn.close()
+                    
+                    # Move to cache location
+                    shutil.move(tmp_path, self.LOCAL_DB_PATH)
+                    
+                    # Save version info
+                    with open(LOCAL_VERSION_PATH, 'w') as f:
+                        f.write(f"{version}\n{datetime.now().isoformat()}")
+                    
+                    print(f"DONE: Database updated successfully!", file=sys.stderr)
+                    print(f"   Version: {version}", file=sys.stderr)
+                    print(f"   Resources: {mappings_count} mappings, {instances_count} instance types", 
+                          file=sys.stderr)
+                    return True
+                    
+                except Exception as e:
+                    if os.path.exists(tmp_path):
+                        os.unlink(tmp_path)
+                    logger.error(f"Invalid database from {source}: {e}")
+                    print(f"  FAILED: Invalid database from {source}: {e}", file=sys.stderr)
+                    continue
+                    
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    logger.error(f"{source} not found (404). Is the repo public?")
+                    print(f"  FAILED: {source} not found (404). Is the repo public?", file=sys.stderr)
+                else:
+                    logger.error(f"HTTP Error {e.code} from {source}")
+                    print(f"  FAILED: HTTP Error {e.code} from {source}", file=sys.stderr)
+            except Exception as e:
+                logger.error(f"Failed to download from {source}: {e}")
+                print(f"  FAILED: Failed to download from {source}: {e}", file=sys.stderr)
+        
+        # If download failed but we have cache, use it
+        if self.LOCAL_DB_PATH.exists():
+            logger.warning("Using cached database (download failed)")
+            print(f"WARNING:  Using cached database (download failed)", file=sys.stderr)
+            return True
+        
+        logger.error(f"Could not download database from {GITHUB_REPO}")
+        print(f"""
+ERROR: Could not download database. Please check:
+   1. Repository exists: https://github.com/{GITHUB_REPO}
+   2. Repository is public
+   3. Database file exists at: db/cloud_rosetta.db
+   4. You have internet connectivity
+        """, file=sys.stderr)
+        return False
+    
+    def translate_and_estimate(self, provider: str, plan_file: Optional[str] = None, 
+                              format: str = "table", cleanup: bool = True):
+        """Main workflow: translate and estimate costs"""
+        
+        # Import translator
+        try:
+            # Try to import from installed package
+            from rosetta_translator import RosettaTranslator
+        except ImportError:
+            # Fall back to local file
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            from rosetta_translator_v2 import RosettaTranslatorV2 as RosettaTranslator
+        
+        # Generate or use existing plan
+        if not plan_file:
+            print("INFO: Generating Terraform plan...", file=sys.stderr)
+            tf_tool = self._detect_terraform_tool()
+            plan_file = self._generate_plan(tf_tool)
+        else:
+            print(f"INFO: Using existing plan: {plan_file}", file=sys.stderr)
+        
+        # Translate if needed
+        source_provider = self._detect_provider_from_plan(plan_file)
+        
+        if source_provider != provider:
+            print(f"TRANSLATING: Translating from {source_provider.upper()} to {provider.upper()}...", 
+                  file=sys.stderr)
+            
+            with open(plan_file, 'r') as f:
+                plan_data = json.load(f)
+            
+            translator = RosettaTranslator(plan_data, str(self.LOCAL_DB_PATH))
+            translated_plan = translator.translate(provider)
+            
+            output_file = f"tfplan_{provider}.json"
+            with open(output_file, 'w') as f:
+                json.dump(translated_plan, f, indent=2)
+            
+            plan_file = output_file
+            print(f"DONE: Translation complete: {output_file}", file=sys.stderr)
+        
+        # Run cost estimation
+        self._run_infracost(plan_file, provider, format)
+        
+        # Cleanup
+        if cleanup and not plan_file:
+            for f in ["tf.plan", "tfplan.json", f"tfplan_{provider}.json"]:
+                if os.path.exists(f):
+                    os.remove(f)
+            print(f"CLEANUP: Cleaned up temporary files", file=sys.stderr)
+    
+    def _detect_terraform_tool(self) -> str:
+        """Detect terraform or tofu"""
+        for tool in ["tofu", "terraform"]:
+            try:
+                subprocess.run([tool, "--version"], capture_output=True, check=True)
+                logger.info(f"Detected {tool} installation")
+                return tool
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                logger.debug(f"{tool} not found")
+                continue
+        logger.error("Neither terraform nor tofu found")
+        raise RuntimeError("Neither terraform nor tofu found")
+    
+    def _generate_plan(self, tf_tool: str) -> str:
+        """Generate terraform plan"""
+        try:
+            logger.info(f"Generating {tf_tool} plan")
+            result = subprocess.run([tf_tool, "plan", "-out=tf.plan"], 
+                                  check=True, capture_output=True, text=True)
+            if result.stderr:
+                logger.debug(f"{tf_tool} plan stderr: {result.stderr}")
+            
+            result = subprocess.run([tf_tool, "show", "-json", "tf.plan"], 
+                                  check=True, capture_output=True, text=True)
+            
+            with open("tfplan.json", 'w') as f:
+                f.write(result.stdout)
+            
+            logger.info("Plan generated successfully")
+            return "tfplan.json"
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to generate plan: {e}")
+            if e.stderr:
+                logger.error(f"Error output: {e.stderr}")
+            raise
+    
+    def _detect_provider_from_plan(self, plan_file: str) -> str:
+        """Detect provider from plan file"""
+        with open(plan_file, 'r') as f:
+            plan_data = json.load(f)
+        
+        # Check resource types
+        if "resource_changes" in plan_data:
+            for change in plan_data["resource_changes"]:
+                resource_type = change.get("type", "")
+                if resource_type.startswith("aws_"):
+                    return "aws"
+                elif resource_type.startswith("openstack_"):
+                    return "ovh"
+                elif resource_type.startswith("hcloud_"):
+                    return "hetzner"
+        
+        return "unknown"
+    
+    def _run_infracost(self, plan_file: str, provider: str, format: str):
+        """Run Infracost"""
+        logger.info(f"Running Infracost for {provider.upper()}")
+        print(f"COST: Running Infracost for {provider.upper()}...", file=sys.stderr)
+        
+        try:
+            result = subprocess.run([
+                "infracost", "breakdown",
+                "--path", plan_file,
+                "--format", format
+            ], capture_output=True, text=True, check=True)
+            
+            if result.stderr:
+                logger.debug(f"Infracost stderr: {result.stderr}")
+            
+            print(result.stdout)
+            
+            # Add provider-specific notes
+            if provider == "ovh":
+                print("\nNote: Using AWS pricing as proxy. Actual OVH prices are typically 20-30% lower.",
+                      file=sys.stderr)
+            elif provider == "hetzner":
+                print("\nNote: Using AWS pricing as proxy. Actual Hetzner prices are typically 40-50% lower.",
+                      file=sys.stderr)
+            
+            logger.info("Infracost completed successfully")
+                      
+        except FileNotFoundError:
+            logger.error("Infracost not found")
+            print("ERROR: Infracost not found. Install it from: https://www.infracost.io/docs/", 
+                  file=sys.stderr)
+            raise
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Infracost failed: {e}")
+            if e.stderr:
+                logger.error(f"Infracost error output: {e.stderr}")
+            print(f"ERROR: Infracost failed: {e.stderr}", file=sys.stderr)
+            raise
+
+
+def main():
+    try:
+        parser = argparse.ArgumentParser(
+            description="Rosetta - Universal Cloud Cost Estimator (GitHub Edition)",
+        epilog="""
+Examples:
+  rosetta --provider aws                  # Estimate AWS costs
+  rosetta --provider ovh                  # Translate to OVH and estimate
+  rosetta --provider hetzner              # Translate to Hetzner and estimate
+  rosetta --repo gordonmurray/cloud-rosetta   # Use a different GitHub repo
+  rosetta --update                        # Force database update
+  rosetta --version                       # Show database version
+  
+First-time setup:
+  1. Fork https://github.com/gordonmurray/cloud-rosetta
+  2. Run: rosetta --repo gordonmurray/cloud-rosetta --provider aws
+  
+The database is automatically cached and updated daily from GitHub.
+        """
+    )
+    
+    parser.add_argument("--provider", "-p", 
+                       choices=["aws", "ovh", "hetzner", "azure", "gcp"],
+                       help="Target cloud provider")
+    
+    parser.add_argument("--repo", "-r",
+                       help="GitHub repository (default: gordonmurray/cloud-rosetta)")
+    
+    parser.add_argument("--update", "-u", action="store_true",
+                       help="Force database update from GitHub")
+    
+    parser.add_argument("--version", "-v", action="store_true",
+                       help="Show database version")
+    
+    parser.add_argument("--format", "-f", default="table",
+                       choices=["table", "json", "html"],
+                       help="Output format (default: table)")
+    
+    parser.add_argument("--plan-file", 
+                       help="Use existing Terraform plan JSON")
+    
+    parser.add_argument("--no-cleanup", dest="cleanup", action="store_false",
+                       help="Keep temporary files")
+    
+        args = parser.parse_args()
+        
+        # Set logging level based on verbosity
+        if hasattr(args, 'verbose') and args.verbose:
+            logging.getLogger().setLevel(logging.DEBUG)
+        
+        # Initialize CLI
+        cli = RosettaCLI(repo_override=args.repo)
+    
+        # Handle version command
+        if args.version:
+        if LOCAL_VERSION_PATH.exists():
+            with open(LOCAL_VERSION_PATH, 'r') as f:
+                version_info = f.read().strip().split('\n')
+                print(f"Database Version: {version_info[0]}")
+                if len(version_info) > 1:
+                    print(f"Last Updated: {version_info[1]}")
+        else:
+            print("No version information available. Run with --update to fetch database.")
+            return
+        
+        # Download/update database
+    if not cli.download_database(force=args.update):
+        print("Cannot proceed without database. Check your internet connection and repo settings.",
+              file=sys.stderr)
+        sys.exit(1)
+    
+        # If provider specified, run translation and estimation
+        if args.provider:
+        cli.translate_and_estimate(
+            provider=args.provider,
+            plan_file=args.plan_file,
+            format=args.format,
+            cleanup=args.cleanup
+        )
+        elif not args.update and not args.version:
+            parser.print_help()
+    
+    except KeyboardInterrupt:
+        logger.info("Operation cancelled by user")
+        print("\nOperation cancelled by user", file=sys.stderr)
+        sys.exit(130)
+    except RuntimeError as e:
+        logger.error(f"Runtime error: {e}")
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        logger.exception("Unexpected error occurred")
+        print(f"ERROR: An unexpected error occurred: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
