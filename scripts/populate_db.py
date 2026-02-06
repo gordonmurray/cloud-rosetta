@@ -86,6 +86,34 @@ class ComprehensiveDBPopulator:
                 )
             """)
             
+            # Add regions table
+            self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS regions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider TEXT NOT NULL,
+                region_code TEXT NOT NULL,
+                region_name TEXT NOT NULL,
+                country TEXT,
+                continent TEXT,
+                latitude REAL,
+                longitude REAL,
+                UNIQUE(provider, region_code)
+            )
+            """)
+            
+            # Add images table
+            self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS images (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider TEXT NOT NULL,
+                image_name TEXT NOT NULL,
+                os_family TEXT NOT NULL,
+                os_version TEXT,
+                architecture TEXT DEFAULT 'x86_64',
+                UNIQUE(provider, image_name)
+            )
+            """)
+            
             self.conn.commit()
         except Exception as e:
             print(f"Error extending schema: {e}")
@@ -368,6 +396,99 @@ class ComprehensiveDBPopulator:
         self.conn.commit()
         print(f"Done: Added {len(aws_instances)} AWS, {len(ovh_instances)} OVH, {len(hetzner_instances)} Hetzner instances")
     
+    def populate_regions(self):
+        """Populate regions table with cloud provider regions"""
+        regions = [
+            # AWS regions
+            ("aws", "us-east-1", "N. Virginia, USA", "USA", "North America", 38.747, -77.517),
+            ("aws", "us-west-2", "Oregon, USA", "USA", "North America", 45.523, -122.676),
+            ("aws", "eu-west-1", "Ireland", "Ireland", "Europe", 53.349, -6.260),
+            ("aws", "eu-west-2", "London, UK", "UK", "Europe", 51.507, -0.127),
+            ("aws", "eu-west-3", "Paris, France", "France", "Europe", 48.856, 2.352),
+            ("aws", "eu-central-1", "Frankfurt, Germany", "Germany", "Europe", 50.110, 8.682),
+            ("aws", "ap-southeast-1", "Singapore", "Singapore", "Asia", 1.352, 103.819),
+            ("aws", "ap-southeast-2", "Sydney, Australia", "Australia", "Oceania", -33.868, 151.209),
+            ("aws", "ca-central-1", "Montreal, Canada", "Canada", "North America", 45.501, -73.567),
+            
+            # OVH regions
+            ("ovh", "GRA9", "Gravelines, France", "France", "Europe", 50.987, 2.762),
+            ("ovh", "GRA11", "Gravelines, France", "France", "Europe", 50.987, 2.762),
+            ("ovh", "SBG5", "Strasbourg, France", "France", "Europe", 48.573, 7.752),
+            ("ovh", "RBX", "Roubaix, France", "France", "Europe", 50.694, 3.174),
+            ("ovh", "DE1", "Frankfurt, Germany", "Germany", "Europe", 50.110, 8.682),
+            ("ovh", "UK1", "London, UK", "UK", "Europe", 51.507, -0.127),
+            ("ovh", "WAW1", "Warsaw, Poland", "Poland", "Europe", 52.229, 21.012),
+            ("ovh", "BHS5", "Beauharnois, Canada", "Canada", "North America", 45.315, -73.874),
+            ("ovh", "SGP1", "Singapore", "Singapore", "Asia", 1.352, 103.819),
+            ("ovh", "SYD1", "Sydney, Australia", "Australia", "Oceania", -33.868, 151.209),
+            
+            # Hetzner regions
+            ("hetzner", "nbg1", "Nuremberg, Germany", "Germany", "Europe", 49.452, 11.077),
+            ("hetzner", "fsn1", "Falkenstein, Germany", "Germany", "Europe", 50.478, 12.337),
+            ("hetzner", "hel1", "Helsinki, Finland", "Finland", "Europe", 60.169, 24.938),
+            ("hetzner", "ash", "Ashburn, USA", "USA", "North America", 39.043, -77.487),
+        ]
+        
+        print(f"- Populating {len(regions)} regions...")
+        for region in regions:
+            try:
+                self.cursor.execute("""
+                    INSERT OR REPLACE INTO regions 
+                    (provider, region_code, region_name, country, continent, latitude, longitude)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, region)
+            except sqlite3.IntegrityError:
+                pass
+        
+        self.conn.commit()
+        print(f"Done: Added {len(regions)} regions")
+    
+    def populate_images(self):
+        """Populate images table with OS images"""
+        images = [
+            # AWS
+            ("aws", "ami-ubuntu-24.04", "ubuntu", "24.04"),
+            ("aws", "ami-ubuntu-22.04", "ubuntu", "22.04"),
+            ("aws", "ami-ubuntu-20.04", "ubuntu", "20.04"),
+            ("aws", "ami-debian-12", "debian", "12"),
+            ("aws", "ami-debian-11", "debian", "11"),
+            ("aws", "ami-centos-8", "centos", "8"),
+            
+            # OVH
+            ("ovh", "Ubuntu 24.04", "ubuntu", "24.04"),
+            ("ovh", "Ubuntu 22.04", "ubuntu", "22.04"),
+            ("ovh", "Ubuntu 20.04", "ubuntu", "20.04"),
+            ("ovh", "Debian 12", "debian", "12"),
+            ("ovh", "Debian 11", "debian", "11"),
+            ("ovh", "CentOS 8", "centos", "8"),
+            ("ovh", "Rocky Linux 8", "rocky", "8"),
+            ("ovh", "AlmaLinux 8", "almalinux", "8"),
+            
+            # Hetzner
+            ("hetzner", "ubuntu-24.04", "ubuntu", "24.04"),
+            ("hetzner", "ubuntu-22.04", "ubuntu", "22.04"),
+            ("hetzner", "ubuntu-20.04", "ubuntu", "20.04"),
+            ("hetzner", "debian-12", "debian", "12"),
+            ("hetzner", "debian-11", "debian", "11"),
+            ("hetzner", "centos-8", "centos", "8"),
+            ("hetzner", "rocky-8", "rocky", "8"),
+            ("hetzner", "almalinux-8", "almalinux", "8"),
+        ]
+        
+        print(f"- Populating {len(images)} OS images...")
+        for img in images:
+            try:
+                self.cursor.execute("""
+                    INSERT OR REPLACE INTO images 
+                    (provider, image_name, os_family, os_version, architecture)
+                    VALUES (?, ?, ?, ?, 'x86_64')
+                """, img)
+            except sqlite3.IntegrityError:
+                pass
+        
+        self.conn.commit()
+        print(f"Done: Added {len(images)} OS images")
+    
     def update_db_version(self):
         """Update database version information"""
         version = datetime.now().strftime("%Y%m%d.%H%M%S")
@@ -398,6 +519,8 @@ def main():
     # Populate all data
     populator.populate_comprehensive_resources()
     populator.populate_extended_instances()
+    populator.populate_regions()
+    populator.populate_images()
     populator.update_db_version()
     
     populator.close()
