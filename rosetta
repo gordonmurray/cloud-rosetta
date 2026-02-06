@@ -161,36 +161,43 @@ class CloudRosettaDB:
             return "1.0.0"
             
     def map_resource_type(self, source_terraform_type: str, target_provider: str) -> Optional[str]:
-        """Map a Terraform resource type to target provider"""
+        """Map a Terraform resource type from any provider to target provider"""
         
-        # Map directly using resource_mappings table
-        if target_provider == "ovh":
-            self.cursor.execute("""
-                SELECT ovh_type
-                FROM resource_mappings
-                WHERE aws_type = ?
-            """, (source_terraform_type,))
-        elif target_provider == "hetzner":
-            self.cursor.execute("""
-                SELECT hetzner_type
-                FROM resource_mappings
-                WHERE aws_type = ?
-            """, (source_terraform_type,))
-        elif target_provider == "azure":
-            self.cursor.execute("""
-                SELECT azure_type
-                FROM resource_mappings
-                WHERE aws_type = ?
-            """, (source_terraform_type,))
-        elif target_provider == "gcp":
-            self.cursor.execute("""
-                SELECT gcp_type
-                FROM resource_mappings
-                WHERE aws_type = ?
-            """, (source_terraform_type,))
+        # Determine source provider from resource type
+        if source_terraform_type.startswith("aws_"):
+            source_col = "aws_type"
+        elif source_terraform_type.startswith("openstack_"):
+            source_col = "ovh_type" 
+        elif source_terraform_type.startswith("hcloud_"):
+            source_col = "hetzner_type"
+        elif source_terraform_type.startswith("azurerm_"):
+            source_col = "azure_type"
+        elif source_terraform_type.startswith("google_"):
+            source_col = "gcp_type"
         else:
             return None
             
+        # Determine target column
+        if target_provider == "aws":
+            target_col = "aws_type"
+        elif target_provider == "ovh":
+            target_col = "ovh_type"
+        elif target_provider == "hetzner":
+            target_col = "hetzner_type"
+        elif target_provider == "azure":
+            target_col = "azure_type"
+        elif target_provider == "gcp":
+            target_col = "gcp_type"
+        else:
+            return None
+            
+        # Query the mapping
+        query = f"""
+            SELECT {target_col}
+            FROM resource_mappings
+            WHERE {source_col} = ?
+        """
+        self.cursor.execute(query, (source_terraform_type,))
         result = self.cursor.fetchone()
         return result[0] if result and result[0] else None
         
@@ -952,20 +959,20 @@ class RosettaCLI:
         else:
             print(f"INFO: Using existing plan: {plan_file}", file=sys.stderr)
         
-        # Translate if needed
+        # Translate non-AWS sources to AWS for Infracost (always needed)
         source_provider = self._detect_provider_from_plan(plan_file)
         
-        if source_provider != provider:
-            print(f"TRANSLATING: Translating from {source_provider.upper()} to {provider.upper()}...", 
+        if source_provider != "aws":
+            print(f"TRANSLATING: Translating from {source_provider.upper()} to AWS for cost estimation...", 
                   file=sys.stderr)
             
             with open(plan_file, 'r') as f:
                 plan_data = json.load(f)
             
             translator = RosettaTranslator(plan_data, str(self.LOCAL_DB_PATH))
-            translated_plan = translator.translate(provider)
+            translated_plan = translator.translate("aws")  # Always translate to AWS for Infracost
             
-            output_file = f"tfplan_{provider}.json"
+            output_file = f"tfplan_aws.json"
             with open(output_file, 'w') as f:
                 json.dump(translated_plan, f, indent=2)
             
