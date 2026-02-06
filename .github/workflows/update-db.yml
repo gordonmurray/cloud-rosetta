@@ -11,6 +11,9 @@ on:
       - 'scripts/populate_db.py'
       - '.github/workflows/update-db.yml'
 
+permissions:
+  contents: write  # Allow writing to the repository
+
 jobs:
   update-database:
     runs-on: ubuntu-latest

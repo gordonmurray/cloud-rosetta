@@ -17,6 +17,9 @@ on:
         required: false
         default: 'Weekly database update with latest cloud pricing and resource mappings'
 
+permissions:
+  contents: write  # Allow creating releases
+
 jobs:
   create-release:
     runs-on: ubuntu-latest
