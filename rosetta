@@ -65,6 +65,32 @@ class RosettaCLI:
             logger.error(f"Failed to create cache directory: {e}")
             raise
     
+    def _download_scripts(self):
+        """Download required Python scripts if they don't exist"""
+        script_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scripts')
+        os.makedirs(script_dir, exist_ok=True)
+        
+        required_scripts = [
+            'translator.py',
+            'database_manager.py'
+        ]
+        
+        for script in required_scripts:
+            script_path = os.path.join(script_dir, script)
+            if not os.path.exists(script_path):
+                url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/scripts/{script}"
+                print(f"  -> Downloading {script}...", file=sys.stderr)
+                
+                try:
+                    with urllib.request.urlopen(url, timeout=30) as response:
+                        with open(script_path, 'wb') as f:
+                            f.write(response.read())
+                except Exception as e:
+                    logger.error(f"Failed to download {script}: {e}")
+                    raise RuntimeError(f"Could not download required dependency: {script}")
+        
+        print("INFO: Dependencies downloaded successfully", file=sys.stderr)
+    
     def get_db_age_hours(self) -> float:
         """Get age of local database in hours"""
         if not self.LOCAL_DB_PATH.exists():
@@ -227,7 +253,7 @@ ERROR: Could not download database. Please check:
                               format: str = "table", cleanup: bool = True):
         """Main workflow: translate and estimate costs"""
         
-        # Import translator
+        # Import translator (download if missing)
         try:
             # Try to import from local scripts directory
             script_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scripts')
@@ -235,9 +261,16 @@ ERROR: Could not download database. Please check:
                 sys.path.insert(0, script_dir)
             from translator import RosettaTranslator
         except ImportError:
-            # Fall back to current directory
-            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-            from translator import RosettaTranslator
+            # Try to import from current directory
+            try:
+                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                from translator import RosettaTranslator
+            except ImportError:
+                # Download missing scripts
+                print("INFO: Downloading required dependencies...", file=sys.stderr)
+                self._download_scripts()
+                # Try import again
+                from translator import RosettaTranslator
         
         # Generate or use existing plan
         if not plan_file:
