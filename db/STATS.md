@@ -1,75 +1,61 @@
 # Cloud Rosetta Database Statistics
 
-**Generated:** 2026-02-06 14:27:11 UTC
-**Database Version:** 20260206.142706
-**Last Updated:** 2026-02-06 14:27:06
+**Generated:** 2026-02-06 15:19:24 UTC
+**Database Version:** 20260206.151924
+**Last Updated:** 2026-02-06 15:19:24
 
-## Resource Mappings: 103
+## Resource Mappings: 141
 
 ### By Category:
-- **Network**: 26 resources
-- **Storage**: 15 resources
-- **Database**: 13 resources
-- **Compute**: 9 resources
-- **Iam**: 8 resources
-- **Container**: 7 resources
-- **Serverless**: 6 resources
-- **Monitoring**: 6 resources
-- **Messaging**: 5 resources
-- **Vpn**: 3 resources
-- **Backup**: 3 resources
-- **Cdn**: 2 resources
+- **Network**: 31 resources
+- **Storage**: 21 resources
+- **Database**: 20 resources
+- **Compute**: 12 resources
+- **Iam**: 10 resources
+- **Container**: 9 resources
+- **Serverless**: 8 resources
+- **Monitoring**: 8 resources
+- **Vpn**: 6 resources
+- **Messaging**: 6 resources
+- **Backup**: 6 resources
+- **Cdn**: 4 resources
 
-## Instance Types: 143
+## Instance Types: 76
 
 ### By Provider:
 - **AWS**: 37 instance types
-- **AZURE**: 30 instance types
-- **GCP**: 37 instance types
 - **HETZNER**: 15 instance types
 - **OVH**: 24 instance types
 
-## Regions: 76
+## Regions: 23
 
 ### By Provider:
 - **AWS**: 9 regions
-- **AZURE**: 25 regions
-- **GCP**: 28 regions
 - **HETZNER**: 4 regions
 - **OVH**: 10 regions
 
-## OS Images: 43
+## OS Images: 22
 
 ## Instance Families
 
 ### Burstable
 - **AWS**: 7 instances
-- **AZURE**: 6 instances
-- **GCP**: 3 instances
 
 ### Compute
 - **AWS**: 8 instances
-- **AZURE**: 7 instances
-- **GCP**: 5 instances
 - **OVH**: 5 instances
 
 ### General
 - **AWS**: 11 instances
-- **AZURE**: 7 instances
-- **GCP**: 17 instances
 - **HETZNER**: 10 instances
 - **OVH**: 9 instances
 
 ### Gpu
 - **AWS**: 3 instances
-- **AZURE**: 3 instances
-- **GCP**: 4 instances
 - **OVH**: 2 instances
 
 ### Memory
 - **AWS**: 8 instances
-- **AZURE**: 7 instances
-- **GCP**: 8 instances
 - **HETZNER**: 5 instances
 - **OVH**: 5 instances
 
@@ -85,11 +71,11 @@
 | `aws_ec2_fleet` | `—` | `—` | compute |
 | `aws_spot_instance_request` | `—` | `—` | compute |
 | `aws_placement_group` | `—` | `hcloud_placement_group` | compute |
-| `aws_volume_attachment` | `openstack_compute_volume_attach_v2` | `hcloud_volume_attachment` | storage |
 | `aws_s3_bucket` | `openstack_objectstorage_container_v1` | `—` | storage |
 | `aws_s3_bucket_policy` | `openstack_objectstorage_container_v1` | `—` | storage |
 | `aws_s3_bucket_versioning` | `—` | `—` | storage |
 | `aws_s3_bucket_lifecycle_configuration` | `—` | `—` | storage |
+| `aws_s3_bucket_replication_configuration` | `—` | `—` | storage |
 
 ## Sample Instance Type Mappings
 
