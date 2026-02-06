@@ -6,16 +6,11 @@ Automatically translate Terraform plans between cloud providers (AWS, OVH, Hetzn
 
 ### Installation Options
 
-**Option 1: Manual Download (Recommended)**
+**Option 1: Single File Download (Recommended)**
 ```bash
-# Download the CLI tool
+# Download the standalone CLI tool - no dependencies needed!
 curl -fsSL https://raw.githubusercontent.com/gordonmurray/cloud-rosetta/main/rosetta -o rosetta
 chmod +x rosetta
-
-# Download required dependencies  
-mkdir -p scripts/
-curl -fsSL https://raw.githubusercontent.com/gordonmurray/cloud-rosetta/main/scripts/translator.py -o scripts/translator.py
-curl -fsSL https://raw.githubusercontent.com/gordonmurray/cloud-rosetta/main/scripts/database_manager.py -o scripts/database_manager.py
 ```
 
 **Option 2: Clone Repository**
@@ -24,7 +19,7 @@ git clone https://github.com/gordonmurray/cloud-rosetta.git
 cd cloud-rosetta
 ```
 
-**Option 3: Complete Installation Script**
+**Option 3: System Installation**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/gordonmurray/cloud-rosetta/main/install.sh | bash
 ```
@@ -62,7 +57,7 @@ Note: Using AWS pricing as proxy. Actual OVH prices are typically 20-30% lower.
 - **Cost Estimation**: Uses Infracost with intelligent provider mapping
 - **Comprehensive Database**: 79+ resource types, 76+ instance types
 - **Auto-Updates**: Daily pricing updates via GitHub Actions
-- **No Dependencies**: Single binary, auto-downloads database
+- **Zero Dependencies**: Single file, auto-downloads database
 - **Enterprise Ready**: Offline capability, version control, rollbacks
 
 ## Use Cases
@@ -272,15 +267,15 @@ resource "aws_lb" "main" {
 ## Technical Documentation
 
 - **[Infracost Integration Details](INFRACOST_INTEGRATION.md)** - How Rosetta works with Infracost
-- **[Database Schema](scripts/database_manager.py)** - SQLite database structure
-- **[Translation Logic](scripts/translator.py)** - Resource mapping implementation
+- **[Database Schema](rosetta)** - SQLite database structure (embedded)
+- **[Translation Logic](rosetta)** - Resource mapping implementation (embedded)
 
 ## Contributing
 
 ### Adding New Providers
 1. Fork the repository
 2. Add provider mappings in `scripts/populate_db.py`
-3. Update the CLI in `rosetta` 
+3. Update the embedded database manager in `rosetta` 
 4. Add tests
 5. Submit a PR
 
@@ -291,7 +286,7 @@ resource "aws_lb" "main" {
 4. We'll update the database
 
 ### Pricing Integration
-1. Add pricing APIs to `scripts/fetch_pricing.py`
+1. Add pricing APIs to embedded database manager in `rosetta`
 2. Update the database schema if needed
 3. Test with real workloads
 4. Document accuracy improvements
