@@ -6,36 +6,54 @@ Automatically translate Terraform plans between cloud providers (AWS, OVH, Hetzn
 
 ### Installation Options
 
-**Option 1: Complete Installation (Recommended)**
-```bash
-curl -fsSL https://raw.githubusercontent.com/gordonmurray/cloud-rosetta/main/install.sh | bash
-```
-
-**Option 2: Manual Download**
+**Option 1: Manual Download (Recommended)**
 ```bash
 # Download the CLI tool
-curl -O https://raw.githubusercontent.com/gordonmurray/cloud-rosetta/main/rosetta
+curl -fsSL https://raw.githubusercontent.com/gordonmurray/cloud-rosetta/main/rosetta -o rosetta
 chmod +x rosetta
 
-# Download required dependencies
+# Download required dependencies  
 mkdir -p scripts/
-curl -o scripts/translator.py https://raw.githubusercontent.com/gordonmurray/cloud-rosetta/main/scripts/translator.py
-curl -o scripts/database_manager.py https://raw.githubusercontent.com/gordonmurray/cloud-rosetta/main/scripts/database_manager.py
+curl -fsSL https://raw.githubusercontent.com/gordonmurray/cloud-rosetta/main/scripts/translator.py -o scripts/translator.py
+curl -fsSL https://raw.githubusercontent.com/gordonmurray/cloud-rosetta/main/scripts/database_manager.py -o scripts/database_manager.py
 ```
 
-**Option 3: Clone Repository**
+**Option 2: Clone Repository**
 ```bash
 git clone https://github.com/gordonmurray/cloud-rosetta.git
 cd cloud-rosetta
 ```
 
+**Option 3: Complete Installation Script**
+```bash
+curl -fsSL https://raw.githubusercontent.com/gordonmurray/cloud-rosetta/main/install.sh | bash
+```
+
 ### Usage
 ```bash
-# Use in any Terraform project
-terraform plan
+# Use in any Terraform project directory
+terraform plan                # or: tofu plan
 ./rosetta --provider aws      # Get AWS costs
 ./rosetta --provider ovh      # Translate to OVH and estimate costs  
 ./rosetta --provider hetzner  # Translate to Hetzner and estimate costs
+```
+
+**Example Output:**
+```
+$ ./rosetta --provider aws
+Project: tfplan.json
+ aws_instance.test                                                                       
+ ├─ Instance usage (Linux/UNIX, on-demand, t3.micro)          730  hours         $7.59   
+ └─ root_block_device                                                                    
+   └─ Storage (general purpose SSD, gp2)                       8  GB            $0.80   
+ OVERALL TOTAL                                                                  $8.39 
+
+$ ./rosetta --provider ovh  
+Translating from AWS to OVH...
+Processing: aws_instance.test
+  Resource type: aws_instance → openstack_compute_instance_v2
+  Mapped aws 't3.micro' → ovh 'd2-2'
+Note: Using AWS pricing as proxy. Actual OVH prices are typically 20-30% lower.
 ```
 
 ## Features
@@ -157,26 +175,19 @@ images (provider, image_name, os_family, os_version)
 
 ## Installation & Setup
 
-### Option 1: Direct Download
-```bash
-curl -O https://raw.githubusercontent.com/gordonmurray/cloud-rosetta/main/rosetta
-chmod +x rosetta
-./rosetta --provider aws
-```
+### Prerequisites
+- Python 3.8+ (for the CLI script)
+- [Terraform](https://terraform.io) or [OpenTofu](https://opentofu.org)
+- [Infracost](https://www.infracost.io/docs/) (auto-installed on first run)
 
-### Option 2: Fork & Customize
+### Fork & Customize
 ```bash
 # 1. Fork this repository
-# 2. Update GitHub Actions secrets (optional)
+# 2. Update GitHub Actions secrets (optional)  
 # 3. Customize resource mappings in scripts/populate_db.py
 # 4. Use your fork:
-./rosetta --repo gordonmurray/cloud-rosetta --provider ovh
+./rosetta --repo your-username/cloud-rosetta --provider ovh
 ```
-
-### Requirements
-- Python 3.8+ (for the CLI script)
-- [Infracost](https://www.infracost.io/docs/) (auto-installed on first run)
-- [Terraform](https://terraform.io) or [OpenTofu](https://opentofu.org)
 
 ## Cost Accuracy
 

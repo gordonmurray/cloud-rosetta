@@ -63,7 +63,7 @@ jobs:
     
     - name: Generate comprehensive release notes
       run: |
-        cat > RELEASE_NOTES.md << 'EOF'
+        cat > RELEASE_NOTES.md << EOF
         # Cloud Rosetta Database Release ${{ steps.get_version.outputs.new_version }}
         
         Released: $(date +"%B %d, %Y")
@@ -74,7 +74,7 @@ jobs:
         
         ## Database Statistics
         
-        EOF
+EOF
         
         # Append current stats
         cat db/STATS.md >> RELEASE_NOTES.md
