@@ -65,8 +65,8 @@ jobs:
           exit 0
         fi
         
-        # Commit changes
-        git add db/cloud_rosetta.db db/STATS.md
+        # Commit changes (use -f to force add files ignored by .gitignore)
+        git add -f db/cloud_rosetta.db db/STATS.md
         git commit -m "Update cloud database $(date +%Y-%m-%d)"
         git push
     
