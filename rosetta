@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
 Rosetta - Universal Cloud Cost Estimator
-GitHub-hosted version with automatic database updates
+Standalone version with embedded dependencies
 """
 
 import os
 import sys
 import json
+import sqlite3
 import argparse
 import subprocess
 import tempfile
@@ -14,7 +15,8 @@ import shutil
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
+from dataclasses import dataclass
 import urllib.request
 import urllib.error
 
@@ -37,6 +39,626 @@ LOCAL_CACHE_DIR = Path.home() / ".rosetta"
 LOCAL_DB_PATH = LOCAL_CACHE_DIR / "cloud_rosetta.db"
 LOCAL_VERSION_PATH = LOCAL_CACHE_DIR / "version.txt"
 DB_MAX_AGE_HOURS = 24  # Re-download if older than this
+
+# ============================================================================
+# EMBEDDED DATABASE MANAGER
+# ============================================================================
+
+@dataclass
+class InstanceMapping:
+    """Represents an instance type mapping between clouds"""
+    provider: str
+    instance_type: str
+    vcpu: int
+    memory_gb: float
+    family: str
+    generation: str
+    
+@dataclass
+class RegionMapping:
+    """Represents a region mapping between clouds"""
+    provider: str
+    region_code: str
+    region_name: str
+    latitude: float
+    longitude: float
+
+class CloudRosettaDB:
+    """Manages the cloud resource mapping database"""
+    
+    def __init__(self, db_path: str = "cloud_rosetta.db"):
+        self.db_path = db_path
+        self.conn = sqlite3.connect(db_path)
+        self.conn.row_factory = sqlite3.Row
+        self.cursor = self.conn.cursor()
+        self._create_schema()
+        
+    def _create_schema(self):
+        """Create database schema if it doesn't exist"""
+        
+        # Instance types table - stores all instance types from all providers
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS instance_types (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider TEXT NOT NULL,
+                instance_type TEXT NOT NULL,
+                vcpu INTEGER NOT NULL,
+                memory_gb REAL NOT NULL,
+                family TEXT,
+                generation TEXT,
+                network_performance TEXT,
+                storage_type TEXT,
+                storage_gb INTEGER,
+                gpu_count INTEGER DEFAULT 0,
+                gpu_type TEXT,
+                hourly_price REAL,
+                notes TEXT,
+                UNIQUE(provider, instance_type)
+            )
+        """)
+        
+        # Resource mappings table - maps resource types between providers
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS resource_mappings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                aws_type TEXT,
+                ovh_type TEXT,
+                hetzner_type TEXT,
+                azure_type TEXT,
+                gcp_type TEXT,
+                category TEXT,
+                notes TEXT,
+                UNIQUE(aws_type, ovh_type, hetzner_type)
+            )
+        """)
+        
+        # Regions table - stores region information for all providers
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS regions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider TEXT NOT NULL,
+                region_code TEXT NOT NULL,
+                region_name TEXT NOT NULL,
+                latitude REAL,
+                longitude REAL,
+                continent TEXT,
+                country TEXT,
+                city TEXT,
+                UNIQUE(provider, region_code)
+            )
+        """)
+        
+        # Images/OS mappings
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS images (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider TEXT NOT NULL,
+                image_name TEXT NOT NULL,
+                os_family TEXT NOT NULL,
+                os_version TEXT,
+                architecture TEXT DEFAULT 'x86_64',
+                UNIQUE(provider, image_name)
+            )
+        """)
+        
+        # Database metadata
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+        
+        self.conn.commit()
+        
+    def get_version(self) -> str:
+        """Get database version"""
+        try:
+            self.cursor.execute("SELECT value FROM metadata WHERE key = 'version'")
+            result = self.cursor.fetchone()
+            return result[0] if result else "1.0.0"
+        except:
+            return "1.0.0"
+            
+    def map_resource_type(self, source_terraform_type: str, target_provider: str) -> Optional[str]:
+        """Map a Terraform resource type to target provider"""
+        
+        # Map directly using resource_mappings table
+        if target_provider == "ovh":
+            self.cursor.execute("""
+                SELECT ovh_type
+                FROM resource_mappings
+                WHERE aws_type = ?
+            """, (source_terraform_type,))
+        elif target_provider == "hetzner":
+            self.cursor.execute("""
+                SELECT hetzner_type
+                FROM resource_mappings
+                WHERE aws_type = ?
+            """, (source_terraform_type,))
+        elif target_provider == "azure":
+            self.cursor.execute("""
+                SELECT azure_type
+                FROM resource_mappings
+                WHERE aws_type = ?
+            """, (source_terraform_type,))
+        elif target_provider == "gcp":
+            self.cursor.execute("""
+                SELECT gcp_type
+                FROM resource_mappings
+                WHERE aws_type = ?
+            """, (source_terraform_type,))
+        else:
+            return None
+            
+        result = self.cursor.fetchone()
+        return result[0] if result and result[0] else None
+        
+    def find_equivalent_instance(self, source_provider: str, source_type: str, target_provider: str) -> Optional[str]:
+        """Find equivalent instance type in target provider"""
+        
+        # Get source instance specs
+        self.cursor.execute("""
+            SELECT vcpu, memory_gb, family
+            FROM instance_types
+            WHERE provider = ? AND instance_type = ?
+        """, (source_provider, source_type))
+        
+        source = self.cursor.fetchone()
+        if not source:
+            return None
+            
+        source_vcpu, source_memory, source_family = source
+        
+        # Find best match in target provider
+        # Priority: same family > similar specs > closest vcpu/memory ratio
+        
+        # Try exact family match first
+        self.cursor.execute("""
+            SELECT instance_type, vcpu, memory_gb,
+                   ABS(vcpu - ?) + ABS(memory_gb - ?) as score
+            FROM instance_types
+            WHERE provider = ? AND family = ?
+            ORDER BY score
+            LIMIT 1
+        """, (source_vcpu, source_memory, target_provider, source_family))
+        
+        result = self.cursor.fetchone()
+        if result:
+            return result[0]
+            
+        # Fall back to closest specs match
+        self.cursor.execute("""
+            SELECT instance_type, vcpu, memory_gb,
+                   ABS(vcpu - ?) + ABS(memory_gb - ?) as score
+            FROM instance_types
+            WHERE provider = ?
+            ORDER BY score
+            LIMIT 1
+        """, (source_vcpu, source_memory, target_provider))
+        
+        result = self.cursor.fetchone()
+        return result[0] if result else None
+        
+    def find_nearest_region(self, source_provider: str, source_region: str, target_provider: str) -> Optional[str]:
+        """Find nearest region in target provider"""
+        
+        # Get source region coordinates
+        self.cursor.execute("""
+            SELECT latitude, longitude
+            FROM regions
+            WHERE provider = ? AND region_code = ?
+        """, (source_provider, source_region))
+        
+        source = self.cursor.fetchone()
+        if not source:
+            return None
+            
+        source_lat, source_lon = source
+        
+        # Find nearest region in target provider using distance formula
+        self.cursor.execute("""
+            SELECT region_code, 
+                   ((latitude - ?) * (latitude - ?) + (longitude - ?) * (longitude - ?)) as distance
+            FROM regions
+            WHERE provider = ?
+            ORDER BY distance
+            LIMIT 1
+        """, (source_lat, source_lat, source_lon, source_lon, target_provider))
+        
+        result = self.cursor.fetchone()
+        return result[0] if result else None
+        
+    def get_stats(self) -> Dict[str, int]:
+        """Get database statistics"""
+        stats = {}
+        
+        # Count resource mappings
+        self.cursor.execute("SELECT COUNT(*) FROM resource_mappings")
+        stats['mappings'] = self.cursor.fetchone()[0]
+        
+        # Count instance types
+        self.cursor.execute("SELECT COUNT(*) FROM instance_types")
+        stats['instances'] = self.cursor.fetchone()[0]
+        
+        # Count regions
+        self.cursor.execute("SELECT COUNT(*) FROM regions")
+        stats['regions'] = self.cursor.fetchone()[0]
+        
+        return stats
+        
+    def close(self):
+        """Close database connection"""
+        if self.conn:
+            self.conn.close()
+
+# ============================================================================
+# EMBEDDED TRANSLATOR
+# ============================================================================
+
+class RosettaTranslator:
+    """Database-driven translator for Terraform plans between cloud providers"""
+    
+    def __init__(self, plan_data: Dict[str, Any], db_path: str = "cloud_rosetta.db"):
+        try:
+            self.plan_data = plan_data
+            self.translated_plan = json.loads(json.dumps(plan_data))  # Deep copy
+            logger.info(f"Initializing translator with database: {db_path}")
+            self.db = CloudRosettaDB(db_path)
+            self.source_provider = None
+            self.target_provider = None
+        except Exception as e:
+            logger.error(f"Failed to initialize translator: {e}")
+            raise
+        
+    def detect_source_provider(self) -> str:
+        """Detect the source cloud provider from the plan"""
+        # Check provider names in configuration
+        if "configuration" in self.plan_data:
+            if "provider_config" in self.plan_data["configuration"]:
+                providers = self.plan_data["configuration"]["provider_config"]
+                
+                if "openstack" in providers or "openstack.ovh" in providers:
+                    return "ovh"
+                elif "aws" in providers:
+                    return "aws"
+                elif "hcloud" in providers:
+                    return "hetzner"
+                elif "azurerm" in providers:
+                    return "azure"
+                elif "google" in providers:
+                    return "gcp"
+        
+        # Check resource types as fallback
+        if "resource_changes" in self.plan_data:
+            for change in self.plan_data["resource_changes"]:
+                if change["type"].startswith("openstack_"):
+                    return "ovh"
+                elif change["type"].startswith("aws_"):
+                    return "aws"
+                elif change["type"].startswith("hcloud_"):
+                    return "hetzner"
+                elif change["type"].startswith("azurerm_"):
+                    return "azure"
+                elif change["type"].startswith("google_"):
+                    return "gcp"
+        
+        return "unknown"
+    
+    def translate_instance_values(self, values: Dict[str, Any], 
+                                 original_type: str) -> Dict[str, Any]:
+        """Translate instance values using database mappings"""
+        translated = {}
+        
+        # Map instance type/flavor
+        if "flavor_name" in values:  # OVH
+            flavor = values["flavor_name"]
+            instance_type = self.db.find_equivalent_instance(
+                self.source_provider, flavor, self.target_provider
+            )
+            if instance_type:
+                if self.target_provider == "aws":
+                    translated["instance_type"] = instance_type
+                elif self.target_provider == "hetzner":
+                    translated["server_type"] = instance_type
+                print(f"  Mapped {self.source_provider} '{flavor}' → {self.target_provider} '{instance_type}'", 
+                      file=sys.stderr)
+        elif "instance_type" in values:  # AWS
+            instance_type = values["instance_type"]
+            mapped_type = self.db.find_equivalent_instance(
+                self.source_provider, instance_type, self.target_provider
+            )
+            if mapped_type:
+                if self.target_provider == "ovh":
+                    translated["flavor_name"] = mapped_type
+                elif self.target_provider == "hetzner":
+                    translated["server_type"] = mapped_type
+                print(f"  Mapped {self.source_provider} '{instance_type}' → {self.target_provider} '{mapped_type}'",
+                      file=sys.stderr)
+        elif "server_type" in values:  # Hetzner
+            server_type = values["server_type"]
+            mapped_type = self.db.find_equivalent_instance(
+                self.source_provider, server_type, self.target_provider
+            )
+            if mapped_type:
+                if self.target_provider == "aws":
+                    translated["instance_type"] = mapped_type
+                elif self.target_provider == "ovh":
+                    translated["flavor_name"] = mapped_type
+                print(f"  Mapped {self.source_provider} '{server_type}' → {self.target_provider} '{mapped_type}'",
+                      file=sys.stderr)
+        
+        # Map region
+        region_field = None
+        if "region" in values:
+            region_field = "region"
+        elif "location" in values:
+            region_field = "location"
+        elif "availability_zone" in values:
+            region_field = "availability_zone"
+        
+        if region_field:
+            source_region = values[region_field]
+            # For AWS availability zones, extract region
+            if self.source_provider == "aws" and source_region.endswith(('a', 'b', 'c', 'd')):
+                source_region = source_region[:-1]
+            
+            target_region = self.db.find_nearest_region(
+                self.source_provider, source_region, self.target_provider
+            )
+            if target_region:
+                if self.target_provider == "aws":
+                    translated["availability_zone"] = f"{target_region}a"
+                elif self.target_provider == "hetzner":
+                    translated["location"] = target_region
+                else:
+                    translated["region"] = target_region
+                print(f"  Mapped region '{values[region_field]}' → '{target_region}'", 
+                      file=sys.stderr)
+        
+        # Map image/OS
+        if "image_name" in values:  # OVH
+            # Query database for equivalent image
+            self.db.cursor.execute("""
+                SELECT i2.image_name 
+                FROM images i1
+                JOIN images i2 ON i1.os_family = i2.os_family 
+                              AND i1.os_version = i2.os_version
+                WHERE i1.provider = ? AND i1.image_name = ?
+                  AND i2.provider = ?
+                LIMIT 1
+            """, (self.source_provider, values["image_name"], self.target_provider))
+            result = self.db.cursor.fetchone()
+            if result:
+                if self.target_provider == "aws":
+                    translated["ami"] = result[0]
+                elif self.target_provider == "hetzner":
+                    translated["image"] = result[0]
+                else:
+                    translated["image_name"] = result[0]
+                print(f"  Mapped image '{values['image_name']}' → '{result[0]}'", 
+                      file=sys.stderr)
+        
+        # Direct mappings that work across providers
+        if "name" in values:
+            if self.target_provider == "aws":
+                translated["tags"] = {"Name": values["name"]}
+            else:
+                translated["name"] = values["name"]
+        
+        if "key_pair" in values:
+            if self.target_provider == "aws":
+                translated["key_name"] = values["key_pair"]
+            elif self.target_provider == "hetzner":
+                translated["ssh_keys"] = [values["key_pair"]]
+        
+        if "user_data" in values:
+            translated["user_data"] = values["user_data"]
+        
+        # Network configuration
+        if "network" in values and len(values["network"]) > 0:
+            if self.target_provider == "aws":
+                translated["associate_public_ip_address"] = True
+        
+        # Security groups (AWS specific)
+        if "security_groups" in values and self.target_provider == "aws":
+            translated["vpc_security_group_ids"] = values["security_groups"]
+        
+        return translated
+    
+    def translate_provider_name(self, provider: str) -> str:
+        """Translate provider names"""
+        provider_map = {
+            "ovh": "registry.terraform.io/hashicorp/aws",
+            "aws": "registry.terraform.io/hashicorp/aws",
+            "hetzner": "registry.terraform.io/hetznercloud/hcloud",
+            "azure": "registry.terraform.io/hashicorp/azurerm",
+            "gcp": "registry.terraform.io/hashicorp/google"
+        }
+        
+        if "openstack" in provider.lower():
+            return provider_map.get(self.target_provider, provider)
+        elif "aws" in provider.lower():
+            return provider_map.get(self.target_provider, provider)
+        elif "hcloud" in provider.lower():
+            return provider_map.get(self.target_provider, provider)
+        
+        return provider
+    
+    def translate(self, target_provider: str) -> Dict[str, Any]:
+        """Main translation method"""
+        try:
+            self.source_provider = self.detect_source_provider()
+            self.target_provider = target_provider
+            
+            logger.info(f"Starting translation from {self.source_provider} to {target_provider}")
+            print(f"Translating from {self.source_provider.upper()} to {target_provider.upper()}...", 
+                  file=sys.stderr)
+            
+            # Translate planned values resources
+            if "planned_values" in self.translated_plan:
+                if "root_module" in self.translated_plan["planned_values"]:
+                    if "resources" in self.translated_plan["planned_values"]["root_module"]:
+                        for resource in self.translated_plan["planned_values"]["root_module"]["resources"]:
+                            original_type = resource["type"]
+                            
+                            # Map resource type using database
+                            new_type = self.db.map_resource_type(original_type, target_provider)
+                            if new_type:
+                                resource["type"] = new_type
+                                resource["provider_name"] = self.translate_provider_name(resource["provider_name"])
+                                
+                                print(f"\nProcessing: {resource['address']}", file=sys.stderr)
+                                print(f"  Resource type: {original_type} → {new_type}", file=sys.stderr)
+                                
+                                # Translate values for compute instances
+                                if "compute" in original_type or "instance" in original_type or "server" in original_type:
+                                    resource["values"] = self.translate_instance_values(
+                                        resource["values"], original_type
+                                    )
+                                
+                                # Clean up provider-specific fields
+                                self.cleanup_values(resource["values"])
+            
+            # Translate resource changes
+            if "resource_changes" in self.translated_plan:
+                for change in self.translated_plan["resource_changes"]:
+                    original_type = change["type"]
+                    
+                    # Map resource type using database
+                    new_type = self.db.map_resource_type(original_type, target_provider)
+                    if new_type:
+                        change["type"] = new_type
+                        change["provider_name"] = self.translate_provider_name(change["provider_name"])
+                        
+                        if "change" in change and "after" in change["change"]:
+                            print(f"\nProcessing change: {change['address']}", file=sys.stderr)
+                            print(f"  Resource type: {original_type} → {new_type}", file=sys.stderr)
+                            
+                            # Translate values for compute instances
+                            if "compute" in original_type or "instance" in original_type or "server" in original_type:
+                                change["change"]["after"] = self.translate_instance_values(
+                                    change["change"]["after"], original_type
+                                )
+                            
+                            # Clean up provider-specific fields
+                            self.cleanup_values(change["change"]["after"])
+            
+            # Update provider configuration
+            self.update_provider_config()
+            
+            logger.info("Translation completed successfully")
+            print("\nDone: Translation complete!", file=sys.stderr)
+            return self.translated_plan
+        except Exception as e:
+            logger.error(f"Translation failed: {e}")
+            raise
+    
+    def cleanup_values(self, values: Dict[str, Any]):
+        """Remove provider-specific fields that don't translate"""
+        if not values:
+            return
+        
+        # Fields to remove based on source provider
+        ovh_specific = ["flavor_name", "image_name", "region", "network", "metadata",
+                       "power_state", "admin_pass", "personality", "vendor_options",
+                       "scheduler_hints", "network_mode", "config_drive",
+                       "availability_zone_hints", "block_device", "force_delete",
+                       "stop_before_destroy"]
+        
+        aws_specific = ["instance_type", "ami", "availability_zone", "tags",
+                       "key_name", "associate_public_ip_address", 
+                       "vpc_security_group_ids"]
+        
+        hetzner_specific = ["server_type", "image", "location", "ssh_keys",
+                           "datacenter", "firewall_ids", "placement_group_id"]
+        
+        # Remove fields based on source provider
+        if self.source_provider == "ovh":
+            fields_to_remove = ovh_specific
+        elif self.source_provider == "aws":
+            fields_to_remove = aws_specific
+        elif self.source_provider == "hetzner":
+            fields_to_remove = hetzner_specific
+        else:
+            fields_to_remove = []
+        
+        for field in fields_to_remove:
+            values.pop(field, None)
+    
+    def update_provider_config(self):
+        """Update provider configuration for target provider"""
+        if "configuration" not in self.translated_plan:
+            return
+        
+        if "provider_config" not in self.translated_plan["configuration"]:
+            return
+        
+        # Set appropriate provider config based on target
+        if self.target_provider == "aws":
+            self.translated_plan["configuration"]["provider_config"] = {
+                "aws": {
+                    "name": "aws",
+                    "full_name": "registry.terraform.io/hashicorp/aws",
+                    "version_constraint": "~> 5.0",
+                    "expressions": {
+                        "region": {"constant_value": "us-east-1"}
+                    }
+                }
+            }
+        elif self.target_provider == "hetzner":
+            self.translated_plan["configuration"]["provider_config"] = {
+                "hcloud": {
+                    "name": "hcloud",
+                    "full_name": "registry.terraform.io/hetznercloud/hcloud",
+                    "version_constraint": "~> 1.42",
+                    "expressions": {}
+                }
+            }
+        elif self.target_provider == "ovh":
+            self.translated_plan["configuration"]["provider_config"] = {
+                "openstack": {
+                    "name": "openstack",
+                    "full_name": "registry.terraform.io/terraform-provider-openstack/openstack",
+                    "version_constraint": "~> 1.49",
+                    "expressions": {
+                        "auth_url": {"constant_value": "https://auth.cloud.ovh.net/v3"},
+                        "domain_name": {"constant_value": "Default"}
+                    }
+                }
+            }
+        elif self.target_provider == "azure":
+            self.translated_plan["configuration"]["provider_config"] = {
+                "azurerm": {
+                    "name": "azurerm",
+                    "full_name": "registry.terraform.io/hashicorp/azurerm",
+                    "version_constraint": "~> 3.0",
+                    "expressions": {
+                        "features": {"constant_value": {}}
+                    }
+                }
+            }
+        elif self.target_provider == "gcp":
+            self.translated_plan["configuration"]["provider_config"] = {
+                "google": {
+                    "name": "google",
+                    "full_name": "registry.terraform.io/hashicorp/google",
+                    "version_constraint": "~> 5.0",
+                    "expressions": {
+                        "project": {"constant_value": "my-project"},
+                        "region": {"constant_value": "us-central1"}
+                    }
+                }
+            }
+    
+    def __del__(self):
+        """Clean up database connection"""
+        if hasattr(self, 'db'):
+            self.db.close()
+
+# ============================================================================
+# MAIN CLI CLASS
+# ============================================================================
 
 class RosettaCLI:
     def __init__(self, repo_override: Optional[str] = None):
@@ -70,17 +692,16 @@ class RosettaCLI:
         if not self.LOCAL_DB_PATH.exists():
             return float('inf')
         
-        mod_time = datetime.fromtimestamp(self.LOCAL_DB_PATH.stat().st_mtime)
-        age = datetime.now() - mod_time
+        db_mtime = datetime.fromtimestamp(self.LOCAL_DB_PATH.stat().st_mtime)
+        age = datetime.now() - db_mtime
         return age.total_seconds() / 3600
     
     def get_latest_version(self) -> Optional[str]:
-        """Get the latest release version from GitHub"""
+        """Get latest database version from GitHub API"""
         try:
-            logger.debug(f"Fetching latest version from {GITHUB_API_URL}")
-            with urllib.request.urlopen(GITHUB_API_URL, timeout=5) as response:
-                data = json.loads(response.read())
-                version = data.get('tag_name', 'unknown')
+            with urllib.request.urlopen(GITHUB_API_URL) as response:
+                data = json.loads(response.read().decode())
+                version = data.get('tag_name', 'v1.0.0')
                 logger.debug(f"Latest version: {version}")
                 return version
         except urllib.error.HTTPError as e:
@@ -93,97 +714,46 @@ class RosettaCLI:
     def download_database(self, force: bool = False) -> bool:
         """Download the latest database from GitHub"""
         
-        # Check if we need to update
-        if not force and self.get_db_age_hours() < DB_MAX_AGE_HOURS:
+        # Check if download is needed
+        if not force:
             age_hours = self.get_db_age_hours()
-            logger.info(f"Using cached database (age: {age_hours:.1f} hours)")
-            print(f"Using cached database (age: {age_hours:.1f} hours)", file=sys.stderr)
-            return True
+            if age_hours < DB_MAX_AGE_HOURS:
+                logger.info(f"Using cached database (age: {age_hours:.1f} hours)")
+                print(f"Using cached database (age: {age_hours:.1f} hours)", file=sys.stderr)
+                return True
         
-        logger.info(f"Fetching latest database from GitHub ({GITHUB_REPO})")
-        print(f"Fetching latest database from GitHub ({GITHUB_REPO})...", file=sys.stderr)
+        logger.info("Downloading latest cloud mapping database...")
+        print("Downloading latest cloud mapping database...", file=sys.stderr)
         
-        # Check latest version
-        latest_version = self.get_latest_version()
-        if latest_version:
-            print(f"  Latest release: {latest_version}", file=sys.stderr)
+        # Try multiple sources in order of preference
+        sources = [GITHUB_RELEASE_URL, GITHUB_RAW_URL]
         
-        # Try different GitHub URLs in order of preference
-        urls = [
-            ("GitHub Release", GITHUB_RELEASE_URL),
-            ("GitHub Raw", GITHUB_RAW_URL),
-        ]
-        
-        for source, url in urls:
+        for source in sources:
             try:
-                print(f"  -> Trying {source}...", file=sys.stderr)
+                print(f"  Trying: {source.split('/')[-2]}/{source.split('/')[-1]}", file=sys.stderr)
                 
-                # Download to temp file
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.db') as tmp_file:
-                    with urllib.request.urlopen(url, timeout=30) as response:
-                        # Stream download with progress
-                        total_size = int(response.headers.get('Content-Length', 0))
-                        downloaded = 0
-                        block_size = 8192
-                        
-                        while True:
-                            buffer = response.read(block_size)
-                            if not buffer:
-                                break
-                            downloaded += len(buffer)
-                            tmp_file.write(buffer)
-                            
-                            # Show progress
-                            if total_size > 0:
-                                percent = (downloaded / total_size) * 100
-                                print(f"\r  -> Downloading: {percent:.1f}% ({downloaded:,} bytes)", 
-                                      end='', file=sys.stderr)
-                        
-                        print(file=sys.stderr)  # New line after progress
-                        tmp_path = tmp_file.name
+                # Download to temporary file first
+                tmp_path = str(self.LOCAL_DB_PATH) + ".tmp"
                 
-                # Verify it's a valid SQLite database
-                import sqlite3
+                with urllib.request.urlopen(source) as response:
+                    with open(tmp_path, 'wb') as f:
+                        shutil.copyfileobj(response, f)
+                
+                # Verify database is valid
                 try:
-                    conn = sqlite3.connect(tmp_path)
-                    cursor = conn.cursor()
+                    test_db = CloudRosettaDB(tmp_path)
+                    stats = test_db.get_stats()
+                    version = test_db.get_version()
+                    test_db.close()
                     
-                    # Check database validity
-                    cursor.execute("""
-                        SELECT COUNT(*) FROM sqlite_master 
-                        WHERE type='table' AND name='resource_mappings'
-                    """)
-                    if cursor.fetchone()[0] == 0:
-                        raise ValueError("Invalid database structure")
+                    # Move to final location
+                    shutil.move(tmp_path, str(self.LOCAL_DB_PATH))
                     
-                    # Get stats
-                    cursor.execute("SELECT COUNT(*) FROM resource_mappings")
-                    mappings_count = cursor.fetchone()[0]
+                    mappings_count = stats.get('mappings', 0)
+                    instances_count = stats.get('instances', 0)
                     
-                    cursor.execute("SELECT COUNT(*) FROM instance_types")
-                    instances_count = cursor.fetchone()[0]
-                    
-                    # Get version if available
-                    try:
-                        cursor.execute("""
-                            SELECT version, updated_at FROM db_version 
-                            ORDER BY id DESC LIMIT 1
-                        """)
-                        version_info = cursor.fetchone()
-                        version = version_info[0] if version_info else "unknown"
-                    except:
-                        version = "unknown"
-                    
-                    conn.close()
-                    
-                    # Move to cache location
-                    shutil.move(tmp_path, self.LOCAL_DB_PATH)
-                    
-                    # Save version info
-                    with open(LOCAL_VERSION_PATH, 'w') as f:
-                        f.write(f"{version}\n{datetime.now().isoformat()}")
-                    
-                    print(f"DONE: Database updated successfully!", file=sys.stderr)
+                    logger.info(f"Database downloaded successfully from {source}")
+                    print(f"  SUCCESS: Database downloaded successfully", file=sys.stderr)
                     print(f"   Version: {version}", file=sys.stderr)
                     print(f"   Resources: {mappings_count} mappings, {instances_count} instance types", 
                           file=sys.stderr)
@@ -209,52 +779,170 @@ class RosettaCLI:
         
         # If download failed but we have cache, use it
         if self.LOCAL_DB_PATH.exists():
-            logger.warning("Using cached database (download failed)")
-            print(f"WARNING:  Using cached database (download failed)", file=sys.stderr)
+            age_hours = self.get_db_age_hours()
+            logger.warning(f"Using stale cached database (age: {age_hours:.1f} hours)")
+            print(f"WARNING: Using stale cached database (age: {age_hours:.1f} hours)", file=sys.stderr)
             return True
         
-        logger.error(f"Could not download database from {GITHUB_REPO}")
-        print(f"""
-ERROR: Could not download database. Please check:
-   1. Repository exists: https://github.com/{GITHUB_REPO}
-   2. Repository is public
-   3. Database file exists at: db/cloud_rosetta.db
-   4. You have internet connectivity
-        """, file=sys.stderr)
+        logger.error("Failed to download database from any source")
+        print("ERROR: Failed to download database from any source", file=sys.stderr)
         return False
+    
+    def show_version(self):
+        """Show version information"""
+        try:
+            if not self.LOCAL_DB_PATH.exists():
+                print("No version information available. Run with --update to fetch database.")
+                return
+                
+            db = CloudRosettaDB(str(self.LOCAL_DB_PATH))
+            version = db.get_version()
+            stats = db.get_stats()
+            age_hours = self.get_db_age_hours()
+            db.close()
+            
+            print(f"Cloud Rosetta Database v{version}")
+            print(f"Database age: {age_hours:.1f} hours")
+            print(f"Resource mappings: {stats.get('mappings', 0)}")
+            print(f"Instance types: {stats.get('instances', 0)}")
+            print(f"Regions: {stats.get('regions', 0)}")
+            print(f"Repository: {GITHUB_REPO}")
+        except Exception as e:
+            logger.error(f"Failed to show version: {e}")
+            print(f"ERROR: Failed to show version: {e}", file=sys.stderr)
+    
+    def _detect_terraform_tool(self) -> str:
+        """Detect terraform or tofu tool"""
+        if shutil.which("tofu"):
+            logger.info("Detected tofu installation")
+            return "tofu"
+        elif shutil.which("terraform"):
+            logger.info("Detected terraform installation")
+            return "terraform"
+        else:
+            raise RuntimeError("Neither terraform nor tofu found in PATH")
+    
+    def _generate_plan(self, tf_tool: str) -> str:
+        """Generate Terraform plan JSON"""
+        try:
+            logger.info(f"Generating {tf_tool} plan")
+            
+            # Generate plan
+            result = subprocess.run(
+                [tf_tool, "plan", "-out=plan.tfplan"],
+                capture_output=True, text=True, check=True
+            )
+            
+            # Convert to JSON
+            result = subprocess.run(
+                [tf_tool, "show", "-json", "plan.tfplan"],
+                capture_output=True, text=True, check=True
+            )
+            
+            plan_file = "tfplan.json"
+            with open(plan_file, 'w') as f:
+                f.write(result.stdout)
+            
+            logger.info("Plan generated successfully")
+            return plan_file
+            
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to generate plan: {e.stderr}")
+            raise RuntimeError(f"Failed to generate {tf_tool} plan: {e.stderr}")
+        except Exception as e:
+            logger.error(f"Unexpected error generating plan: {e}")
+            raise
+    
+    def _detect_provider_from_plan(self, plan_file: str) -> str:
+        """Detect provider from plan file"""
+        try:
+            with open(plan_file, 'r') as f:
+                plan_data = json.load(f)
+            
+            # Check configuration for providers
+            if "configuration" in plan_data and "provider_config" in plan_data["configuration"]:
+                providers = plan_data["configuration"]["provider_config"]
+                
+                if "openstack" in providers:
+                    return "ovh"
+                elif "aws" in providers:
+                    return "aws"
+                elif "hcloud" in providers:
+                    return "hetzner"
+                elif "azurerm" in providers:
+                    return "azure"
+                elif "google" in providers:
+                    return "gcp"
+            
+            # Check resource types
+            if "resource_changes" in plan_data:
+                for change in plan_data["resource_changes"]:
+                    if change["type"].startswith("openstack_"):
+                        return "ovh"
+                    elif change["type"].startswith("aws_"):
+                        return "aws"
+                    elif change["type"].startswith("hcloud_"):
+                        return "hetzner"
+                    elif change["type"].startswith("azurerm_"):
+                        return "azure"
+                    elif change["type"].startswith("google_"):
+                        return "gcp"
+            
+            return "unknown"
+            
+        except Exception as e:
+            logger.error(f"Failed to detect provider: {e}")
+            return "unknown"
+    
+    def _run_infracost(self, plan_file: str, provider: str, format: str):
+        """Run Infracost on the plan file"""
+        try:
+            logger.info(f"Running Infracost for {provider.upper()}")
+            print(f"COST: Running Infracost for {provider.upper()}...", file=sys.stderr)
+            
+            # Check if infracost is available
+            if not shutil.which("infracost"):
+                logger.info("Installing Infracost...")
+                print("Installing Infracost...", file=sys.stderr)
+                
+                # Download and install infracost
+                install_cmd = [
+                    "bash", "-c", 
+                    "curl -fsSL https://raw.githubusercontent.com/infracost/infracost/master/scripts/install.sh | bash"
+                ]
+                subprocess.run(install_cmd, check=True, capture_output=True)
+            
+            # Run infracost
+            cmd = ["infracost", "breakdown", "--path", plan_file]
+            if format != "table":
+                cmd.extend(["--format", format])
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            print(result.stdout)
+            
+            # Add disclaimer for non-AWS providers
+            if provider != "aws":
+                disclaimer = f"\nNote: Using AWS pricing as proxy. Actual {provider.upper()} prices are typically "
+                if provider == "ovh":
+                    disclaimer += "20-30% lower."
+                elif provider == "hetzner":
+                    disclaimer += "40-50% lower."
+                else:
+                    disclaimer += "different from AWS."
+                print(disclaimer, file=sys.stderr)
+            
+            logger.info("Infracost completed successfully")
+            
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Infracost failed: {e.stderr}")
+            print(f"ERROR: Infracost failed: {e.stderr}", file=sys.stderr)
+        except Exception as e:
+            logger.error(f"Failed to run Infracost: {e}")
+            print(f"ERROR: Failed to run Infracost: {e}", file=sys.stderr)
     
     def translate_and_estimate(self, provider: str, plan_file: Optional[str] = None, 
                               format: str = "table", cleanup: bool = True):
         """Main workflow: translate and estimate costs"""
-        
-        # Import translator (download if missing)
-        try:
-            # Try to import from local scripts directory
-            script_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scripts')
-            if script_dir not in sys.path:
-                sys.path.insert(0, script_dir)
-            from translator import RosettaTranslator
-        except ImportError:
-            # Try to import from current directory
-            try:
-                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-                from translator import RosettaTranslator
-            except ImportError:
-                # Inform user about missing dependencies
-                print("\nERROR: Missing required dependencies (translator.py, database_manager.py)", file=sys.stderr)
-                print("\nCloud Rosetta requires additional Python modules to function.", file=sys.stderr)
-                print("Please choose one of the following options:\n", file=sys.stderr)
-                print("1. Use the complete installation:", file=sys.stderr)
-                print("   curl -fsSL https://raw.githubusercontent.com/gordonmurray/cloud-rosetta/main/install.sh | bash", file=sys.stderr)
-                print("\n2. Download dependencies manually:", file=sys.stderr)
-                print("   mkdir -p scripts/", file=sys.stderr)
-                print("   curl -o scripts/translator.py https://raw.githubusercontent.com/gordonmurray/cloud-rosetta/main/scripts/translator.py", file=sys.stderr)
-                print("   curl -o scripts/database_manager.py https://raw.githubusercontent.com/gordonmurray/cloud-rosetta/main/scripts/database_manager.py", file=sys.stderr)
-                print("\n3. Clone the full repository:", file=sys.stderr)
-                print("   git clone https://github.com/gordonmurray/cloud-rosetta.git", file=sys.stderr)
-                print("   cd cloud-rosetta && ./rosetta --provider aws", file=sys.stderr)
-                print("\nFor security, Cloud Rosetta will not automatically download files to your device.", file=sys.stderr)
-                sys.exit(1)
         
         # Generate or use existing plan
         if not plan_file:
@@ -287,111 +975,17 @@ ERROR: Could not download database. Please check:
         # Run cost estimation
         self._run_infracost(plan_file, provider, format)
         
-        # Cleanup
-        if cleanup and not plan_file:
-            for f in ["tf.plan", "tfplan.json", f"tfplan_{provider}.json"]:
-                if os.path.exists(f):
-                    os.remove(f)
-            print(f"CLEANUP: Cleaned up temporary files", file=sys.stderr)
-    
-    def _detect_terraform_tool(self) -> str:
-        """Detect terraform or tofu"""
-        for tool in ["tofu", "terraform"]:
+        # Cleanup temporary files
+        if cleanup and plan_file.startswith("tfplan"):
             try:
-                subprocess.run([tool, "--version"], capture_output=True, check=True)
-                logger.info(f"Detected {tool} installation")
-                return tool
-            except (subprocess.CalledProcessError, FileNotFoundError):
-                logger.debug(f"{tool} not found")
-                continue
-        logger.error("Neither terraform nor tofu found")
-        raise RuntimeError("Neither terraform nor tofu found")
-    
-    def _generate_plan(self, tf_tool: str) -> str:
-        """Generate terraform plan"""
-        try:
-            logger.info(f"Generating {tf_tool} plan")
-            result = subprocess.run([tf_tool, "plan", "-out=tf.plan"], 
-                                  check=True, capture_output=True, text=True)
-            if result.stderr:
-                logger.debug(f"{tf_tool} plan stderr: {result.stderr}")
-            
-            result = subprocess.run([tf_tool, "show", "-json", "tf.plan"], 
-                                  check=True, capture_output=True, text=True)
-            
-            with open("tfplan.json", 'w') as f:
-                f.write(result.stdout)
-            
-            logger.info("Plan generated successfully")
-            return "tfplan.json"
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to generate plan: {e}")
-            if e.stderr:
-                logger.error(f"Error output: {e.stderr}")
-            raise
-    
-    def _detect_provider_from_plan(self, plan_file: str) -> str:
-        """Detect provider from plan file"""
-        with open(plan_file, 'r') as f:
-            plan_data = json.load(f)
-        
-        # Check resource types
-        if "resource_changes" in plan_data:
-            for change in plan_data["resource_changes"]:
-                resource_type = change.get("type", "")
-                if resource_type.startswith("aws_"):
-                    return "aws"
-                elif resource_type.startswith("openstack_"):
-                    return "ovh"
-                elif resource_type.startswith("hcloud_"):
-                    return "hetzner"
-        
-        return "unknown"
-    
-    def _run_infracost(self, plan_file: str, provider: str, format: str):
-        """Run Infracost"""
-        logger.info(f"Running Infracost for {provider.upper()}")
-        print(f"COST: Running Infracost for {provider.upper()}...", file=sys.stderr)
-        
-        try:
-            result = subprocess.run([
-                "infracost", "breakdown",
-                "--path", plan_file,
-                "--format", format
-            ], capture_output=True, text=True, check=True)
-            
-            if result.stderr:
-                logger.debug(f"Infracost stderr: {result.stderr}")
-            
-            print(result.stdout)
-            
-            # Add provider-specific notes
-            if provider == "ovh":
-                print("\nNote: Using AWS pricing as proxy. Actual OVH prices are typically 20-30% lower.",
-                      file=sys.stderr)
-            elif provider == "hetzner":
-                print("\nNote: Using AWS pricing as proxy. Actual Hetzner prices are typically 40-50% lower.",
-                      file=sys.stderr)
-            
-            logger.info("Infracost completed successfully")
-                      
-        except FileNotFoundError:
-            logger.error("Infracost not found")
-            print("ERROR: Infracost not found. Install it from: https://www.infracost.io/docs/", 
-                  file=sys.stderr)
-            raise
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Infracost failed: {e}")
-            if e.stderr:
-                logger.error(f"Infracost error output: {e.stderr}")
-            print(f"ERROR: Infracost failed: {e.stderr}", file=sys.stderr)
-            raise
-
+                os.unlink("plan.tfplan")
+            except:
+                pass
 
 def main():
     try:
         parser = argparse.ArgumentParser(
-            description="Rosetta - Universal Cloud Cost Estimator (GitHub Edition)",
+            description="Rosetta - Universal Cloud Cost Estimator (Standalone Edition)",
             epilog="""
 Examples:
   rosetta --provider aws                  # Estimate AWS costs
@@ -399,73 +993,55 @@ Examples:
   rosetta --provider hetzner              # Translate to Hetzner and estimate
   rosetta --repo gordonmurray/cloud-rosetta   # Use a different GitHub repo
   rosetta --update                        # Force database update
-  rosetta --version                       # Show database version
-  
-First-time setup:
-  1. Fork https://github.com/gordonmurray/cloud-rosetta
-  2. Run: rosetta --repo gordonmurray/cloud-rosetta --provider aws
-  
-The database is automatically cached and updated daily from GitHub.
-            """
+  rosetta --version                       # Show version information""",
+            formatter_class=argparse.RawDescriptionHelpFormatter
         )
         
         parser.add_argument("--provider", "-p", 
                            choices=["aws", "ovh", "hetzner", "azure", "gcp"],
-                           help="Target cloud provider")
-        
-        parser.add_argument("--repo", "-r",
-                           help="GitHub repository (default: gordonmurray/cloud-rosetta)")
-        
-        parser.add_argument("--update", "-u", action="store_true",
-                           help="Force database update from GitHub")
-        
-        parser.add_argument("--version", "-v", action="store_true",
-                           help="Show database version")
-        
-        parser.add_argument("--format", "-f", default="table",
+                           help="Target cloud provider for cost estimation")
+        parser.add_argument("--plan", 
+                           help="Existing Terraform plan JSON file")
+        parser.add_argument("--format", "-f", 
                            choices=["table", "json", "html"],
+                           default="table",
                            help="Output format (default: table)")
-        
-        parser.add_argument("--plan-file", 
-                           help="Use existing Terraform plan JSON")
-        
-        parser.add_argument("--no-cleanup", dest="cleanup", action="store_false",
-                           help="Keep temporary files")
+        parser.add_argument("--repo", 
+                           help="GitHub repository for database (format: owner/repo)")
+        parser.add_argument("--update", 
+                           action="store_true",
+                           help="Force download of latest database")
+        parser.add_argument("--version", 
+                           action="store_true",
+                           help="Show version information")
         
         args = parser.parse_args()
         
-        # Set logging level based on verbosity
-        if hasattr(args, 'verbose') and args.verbose:
-            logging.getLogger().setLevel(logging.DEBUG)
-        
         # Initialize CLI
-        cli = RosettaCLI(repo_override=args.repo)
-    
-        # Handle version command
-        if args.version:
-            if LOCAL_VERSION_PATH.exists():
-                with open(LOCAL_VERSION_PATH, 'r') as f:
-                    version_info = f.read().strip().split('\n')
-                    print(f"Database Version: {version_info[0]}")
-                    if len(version_info) > 1:
-                        print(f"Last Updated: {version_info[1]}")
-            else:
-                print("No version information available. Run with --update to fetch database.")
-            return
+        cli = RosettaCLI(args.repo)
         
-        # Download/update database
-        if not cli.download_database(force=args.update):
-            print("Cannot proceed without database. Check your internet connection and repo settings.",
-                  file=sys.stderr)
-            sys.exit(1)
-    
-        # If provider specified, run translation and estimation
-        if args.provider:
+        # Handle version request
+        if args.version:
+            cli.show_version()
+        # Handle update request
+        elif args.update:
+            success = cli.download_database(force=True)
+            if success:
+                print("Database updated successfully")
+            else:
+                print("Failed to update database")
+                sys.exit(1)
+        # Handle cost estimation
+        elif args.provider:
+            # Download database if needed
+            if not cli.download_database():
+                print("ERROR: Could not download database", file=sys.stderr)
+                sys.exit(1)
+            
             cli.translate_and_estimate(
                 provider=args.provider,
-                plan_file=args.plan_file,
-                format=args.format,
-                cleanup=args.cleanup
+                plan_file=args.plan,
+                format=args.format
             )
         elif not args.update and not args.version:
             parser.print_help()
