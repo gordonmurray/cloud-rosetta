@@ -4,14 +4,33 @@ Automatically translate Terraform plans between cloud providers (AWS, OVH, Hetzn
 
 ## Quick Start
 
-```bash
-# Install
-curl -fsSL https://raw.githubusercontent.com/gordonmurray/cloud-rosetta/main/install.sh | bash
+### Installation Options
 
-# Or download directly
-wget https://raw.githubusercontent.com/gordonmurray/cloud-rosetta/main/rosetta
+**Option 1: Complete Installation (Recommended)**
+```bash
+curl -fsSL https://raw.githubusercontent.com/gordonmurray/cloud-rosetta/main/install.sh | bash
+```
+
+**Option 2: Manual Download**
+```bash
+# Download the CLI tool
+curl -O https://raw.githubusercontent.com/gordonmurray/cloud-rosetta/main/rosetta
 chmod +x rosetta
 
+# Download required dependencies
+mkdir -p scripts/
+curl -o scripts/translator.py https://raw.githubusercontent.com/gordonmurray/cloud-rosetta/main/scripts/translator.py
+curl -o scripts/database_manager.py https://raw.githubusercontent.com/gordonmurray/cloud-rosetta/main/scripts/database_manager.py
+```
+
+**Option 3: Clone Repository**
+```bash
+git clone https://github.com/gordonmurray/cloud-rosetta.git
+cd cloud-rosetta
+```
+
+### Usage
+```bash
 # Use in any Terraform project
 terraform plan
 ./rosetta --provider aws      # Get AWS costs

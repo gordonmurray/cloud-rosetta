@@ -75,6 +75,21 @@ setup_local_install() {
 install_rosetta() {
     print_status "Installing Cloud Rosetta CLI..."
     
+    # Inform user what will be downloaded
+    echo ""
+    echo "This will download and install:"
+    echo "  - rosetta CLI tool (~20KB)"
+    echo "  - Required Python dependencies (~15KB)"
+    echo "  - Database will be downloaded on first use (~80KB)"
+    echo ""
+    echo "Installation location: ${INSTALL_DIR}/"
+    echo ""
+    read -p "Continue with installation? (y/N): " -r
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "Installation cancelled."
+        exit 0
+    fi
+    
     # Check permissions
     check_permissions
     
@@ -117,10 +132,39 @@ install_rosetta() {
     if [ "$NEEDS_SUDO" = true ]; then
         sudo cp "$TEMP_FILE" "$INSTALL_PATH"
         sudo chmod +x "$INSTALL_PATH"
+        # Create scripts directory
+        sudo mkdir -p "$INSTALL_DIR/scripts"
     else
         cp "$TEMP_FILE" "$INSTALL_PATH"
         chmod +x "$INSTALL_PATH"
+        # Create scripts directory
+        mkdir -p "$INSTALL_DIR/scripts"
     fi
+    
+    # Download required Python dependencies
+    print_status "Downloading Python dependencies..."
+    
+    SCRIPTS=("translator.py" "database_manager.py")
+    for script in "${SCRIPTS[@]}"; do
+        SCRIPT_URL="https://raw.githubusercontent.com/$REPO/main/scripts/$script"
+        SCRIPT_PATH="$INSTALL_DIR/scripts/$script"
+        TEMP_SCRIPT=$(mktemp)
+        
+        if command -v curl &> /dev/null; then
+            curl -fsSL "$SCRIPT_URL" -o "$TEMP_SCRIPT"
+        elif command -v wget &> /dev/null; then
+            wget -q "$SCRIPT_URL" -O "$TEMP_SCRIPT"
+        fi
+        
+        if [ -s "$TEMP_SCRIPT" ]; then
+            if [ "$NEEDS_SUDO" = true ]; then
+                sudo cp "$TEMP_SCRIPT" "$SCRIPT_PATH"
+            else
+                cp "$TEMP_SCRIPT" "$SCRIPT_PATH"
+            fi
+        fi
+        rm -f "$TEMP_SCRIPT"
+    done
     
     # Cleanup
     rm "$TEMP_FILE"
