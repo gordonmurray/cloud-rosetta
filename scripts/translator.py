@@ -223,59 +223,59 @@ class RosettaTranslatorV2:
             logger.info(f"Starting translation from {self.source_provider} to {target_provider}")
             print(f"Translating from {self.source_provider.upper()} to {target_provider.upper()}...", 
                   file=sys.stderr)
-        
-        # Translate planned values resources
-        if "planned_values" in self.translated_plan:
-            if "root_module" in self.translated_plan["planned_values"]:
-                if "resources" in self.translated_plan["planned_values"]["root_module"]:
-                    for resource in self.translated_plan["planned_values"]["root_module"]["resources"]:
-                        original_type = resource["type"]
-                        
-                        # Map resource type using database
-                        new_type = self.db.map_resource_type(original_type, target_provider)
-                        if new_type:
-                            resource["type"] = new_type
-                            resource["provider_name"] = self.translate_provider_name(resource["provider_name"])
+            
+            # Translate planned values resources
+            if "planned_values" in self.translated_plan:
+                if "root_module" in self.translated_plan["planned_values"]:
+                    if "resources" in self.translated_plan["planned_values"]["root_module"]:
+                        for resource in self.translated_plan["planned_values"]["root_module"]["resources"]:
+                            original_type = resource["type"]
                             
-                            print(f"\nProcessing: {resource['address']}", file=sys.stderr)
+                            # Map resource type using database
+                            new_type = self.db.map_resource_type(original_type, target_provider)
+                            if new_type:
+                                resource["type"] = new_type
+                                resource["provider_name"] = self.translate_provider_name(resource["provider_name"])
+                                
+                                print(f"\nProcessing: {resource['address']}", file=sys.stderr)
+                                print(f"  Resource type: {original_type} → {new_type}", file=sys.stderr)
+                                
+                                # Translate values for compute instances
+                                if "compute" in original_type or "instance" in original_type or "server" in original_type:
+                                    resource["values"] = self.translate_instance_values(
+                                        resource["values"], original_type
+                                    )
+                                
+                                # Clean up provider-specific fields
+                                self.cleanup_values(resource["values"])
+            
+            # Translate resource changes
+            if "resource_changes" in self.translated_plan:
+                for change in self.translated_plan["resource_changes"]:
+                    original_type = change["type"]
+                    
+                    # Map resource type using database
+                    new_type = self.db.map_resource_type(original_type, target_provider)
+                    if new_type:
+                        change["type"] = new_type
+                        change["provider_name"] = self.translate_provider_name(change["provider_name"])
+                        
+                        if "change" in change and "after" in change["change"]:
+                            print(f"\nProcessing change: {change['address']}", file=sys.stderr)
                             print(f"  Resource type: {original_type} → {new_type}", file=sys.stderr)
                             
                             # Translate values for compute instances
                             if "compute" in original_type or "instance" in original_type or "server" in original_type:
-                                resource["values"] = self.translate_instance_values(
-                                    resource["values"], original_type
+                                change["change"]["after"] = self.translate_instance_values(
+                                    change["change"]["after"], original_type
                                 )
                             
                             # Clean up provider-specific fields
-                            self.cleanup_values(resource["values"])
-        
-        # Translate resource changes
-        if "resource_changes" in self.translated_plan:
-            for change in self.translated_plan["resource_changes"]:
-                original_type = change["type"]
-                
-                # Map resource type using database
-                new_type = self.db.map_resource_type(original_type, target_provider)
-                if new_type:
-                    change["type"] = new_type
-                    change["provider_name"] = self.translate_provider_name(change["provider_name"])
-                    
-                    if "change" in change and "after" in change["change"]:
-                        print(f"\nProcessing change: {change['address']}", file=sys.stderr)
-                        print(f"  Resource type: {original_type} → {new_type}", file=sys.stderr)
-                        
-                        # Translate values for compute instances
-                        if "compute" in original_type or "instance" in original_type or "server" in original_type:
-                            change["change"]["after"] = self.translate_instance_values(
-                                change["change"]["after"], original_type
-                            )
-                        
-                        # Clean up provider-specific fields
-                        self.cleanup_values(change["change"]["after"])
-        
-        # Update provider configuration
-        self.update_provider_config()
-        
+                            self.cleanup_values(change["change"]["after"])
+            
+            # Update provider configuration
+            self.update_provider_config()
+            
             logger.info("Translation completed successfully")
             print("\nDone: Translation complete!", file=sys.stderr)
             return self.translated_plan
@@ -391,14 +391,14 @@ def main():
         parser = argparse.ArgumentParser(
             description="Cloud Rosetta Translator v2 - Database-driven cloud plan translation"
         )
-    parser.add_argument("input_file", help="Input Terraform plan JSON file")
-    parser.add_argument("-t", "--target", required=True, 
-                       choices=["aws", "ovh", "hetzner"],
-                       help="Target cloud provider")
-    parser.add_argument("-o", "--output", help="Output file (default: stdout)")
-    parser.add_argument("--db", default="cloud_rosetta.db", 
-                       help="Database file path")
-    
+        parser.add_argument("input_file", help="Input Terraform plan JSON file")
+        parser.add_argument("-t", "--target", required=True, 
+                           choices=["aws", "ovh", "hetzner"],
+                           help="Target cloud provider")
+        parser.add_argument("-o", "--output", help="Output file (default: stdout)")
+        parser.add_argument("--db", default="cloud_rosetta.db", 
+                           help="Database file path")
+        
         args = parser.parse_args()
         
         # Set logging level

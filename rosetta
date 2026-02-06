@@ -372,7 +372,7 @@ def main():
     try:
         parser = argparse.ArgumentParser(
             description="Rosetta - Universal Cloud Cost Estimator (GitHub Edition)",
-        epilog="""
+            epilog="""
 Examples:
   rosetta --provider aws                  # Estimate AWS costs
   rosetta --provider ovh                  # Translate to OVH and estimate
@@ -386,32 +386,32 @@ First-time setup:
   2. Run: rosetta --repo gordonmurray/cloud-rosetta --provider aws
   
 The database is automatically cached and updated daily from GitHub.
-        """
-    )
-    
-    parser.add_argument("--provider", "-p", 
-                       choices=["aws", "ovh", "hetzner", "azure", "gcp"],
-                       help="Target cloud provider")
-    
-    parser.add_argument("--repo", "-r",
-                       help="GitHub repository (default: gordonmurray/cloud-rosetta)")
-    
-    parser.add_argument("--update", "-u", action="store_true",
-                       help="Force database update from GitHub")
-    
-    parser.add_argument("--version", "-v", action="store_true",
-                       help="Show database version")
-    
-    parser.add_argument("--format", "-f", default="table",
-                       choices=["table", "json", "html"],
-                       help="Output format (default: table)")
-    
-    parser.add_argument("--plan-file", 
-                       help="Use existing Terraform plan JSON")
-    
-    parser.add_argument("--no-cleanup", dest="cleanup", action="store_false",
-                       help="Keep temporary files")
-    
+            """
+        )
+        
+        parser.add_argument("--provider", "-p", 
+                           choices=["aws", "ovh", "hetzner", "azure", "gcp"],
+                           help="Target cloud provider")
+        
+        parser.add_argument("--repo", "-r",
+                           help="GitHub repository (default: gordonmurray/cloud-rosetta)")
+        
+        parser.add_argument("--update", "-u", action="store_true",
+                           help="Force database update from GitHub")
+        
+        parser.add_argument("--version", "-v", action="store_true",
+                           help="Show database version")
+        
+        parser.add_argument("--format", "-f", default="table",
+                           choices=["table", "json", "html"],
+                           help="Output format (default: table)")
+        
+        parser.add_argument("--plan-file", 
+                           help="Use existing Terraform plan JSON")
+        
+        parser.add_argument("--no-cleanup", dest="cleanup", action="store_false",
+                           help="Keep temporary files")
+        
         args = parser.parse_args()
         
         # Set logging level based on verbosity
@@ -423,30 +423,30 @@ The database is automatically cached and updated daily from GitHub.
     
         # Handle version command
         if args.version:
-        if LOCAL_VERSION_PATH.exists():
-            with open(LOCAL_VERSION_PATH, 'r') as f:
-                version_info = f.read().strip().split('\n')
-                print(f"Database Version: {version_info[0]}")
-                if len(version_info) > 1:
-                    print(f"Last Updated: {version_info[1]}")
-        else:
-            print("No version information available. Run with --update to fetch database.")
+            if LOCAL_VERSION_PATH.exists():
+                with open(LOCAL_VERSION_PATH, 'r') as f:
+                    version_info = f.read().strip().split('\n')
+                    print(f"Database Version: {version_info[0]}")
+                    if len(version_info) > 1:
+                        print(f"Last Updated: {version_info[1]}")
+            else:
+                print("No version information available. Run with --update to fetch database.")
             return
         
         # Download/update database
-    if not cli.download_database(force=args.update):
-        print("Cannot proceed without database. Check your internet connection and repo settings.",
-              file=sys.stderr)
-        sys.exit(1)
+        if not cli.download_database(force=args.update):
+            print("Cannot proceed without database. Check your internet connection and repo settings.",
+                  file=sys.stderr)
+            sys.exit(1)
     
         # If provider specified, run translation and estimation
         if args.provider:
-        cli.translate_and_estimate(
-            provider=args.provider,
-            plan_file=args.plan_file,
-            format=args.format,
-            cleanup=args.cleanup
-        )
+            cli.translate_and_estimate(
+                provider=args.provider,
+                plan_file=args.plan_file,
+                format=args.format,
+                cleanup=args.cleanup
+            )
         elif not args.update and not args.version:
             parser.print_help()
     

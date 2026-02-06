@@ -329,16 +329,7 @@ class CloudRosettaDB:
             except sqlite3.IntegrityError:
                 pass
         
-            self.conn.commit()
-            total_items = self.cursor.execute("SELECT COUNT(*) FROM instance_types").fetchone()[0]
-            logger.info(f"Database populated successfully with {total_items} instance types")
-        except sqlite3.Error as e:
-            logger.error(f"Failed to populate database: {e}")
-            self.conn.rollback()
-            raise
-        except Exception as e:
-            logger.error(f"Unexpected error populating database: {e}")
-            raise
+        self.conn.commit()
     
     def find_equivalent_instance(self, source_provider: str, source_type: str, 
                                 target_provider: str) -> Optional[str]:
@@ -359,32 +350,26 @@ class CloudRosettaDB:
         
         # Find best match in target provider
         # Priority: exact match > same family > closest specs
-        self.cursor.execute("""
-            SELECT instance_type,
-                   ABS(vcpu - ?) + ABS(memory_gb - ?) * 0.5 as diff
-            FROM instance_types
-            WHERE provider = ?
-              AND vcpu >= ? * 0.5 AND vcpu <= ? * 2
-              AND memory_gb >= ? * 0.5 AND memory_gb <= ? * 2
-            ORDER BY 
-                CASE WHEN family = ? THEN 0 ELSE 1 END,
-                diff
-            LIMIT 1
-        """, (vcpu, memory_gb, target_provider, 
-              vcpu, vcpu, memory_gb, memory_gb, family))
+        try:
+            self.cursor.execute("""
+                SELECT instance_type,
+                       ABS(vcpu - ?) + ABS(memory_gb - ?) * 0.5 as diff
+                FROM instance_types
+                WHERE provider = ?
+                  AND vcpu >= ? * 0.5 AND vcpu <= ? * 2
+                  AND memory_gb >= ? * 0.5 AND memory_gb <= ? * 2
+                ORDER BY 
+                    CASE WHEN family = ? THEN 0 ELSE 1 END,
+                    diff
+                LIMIT 1
+            """, (vcpu, memory_gb, target_provider, 
+                  vcpu, vcpu, memory_gb, memory_gb, family))
             
             result = self.cursor.fetchone()
-            instance = result[0] if result else None
-            if instance:
-                logger.debug(f"Found match: {instance}")
-            else:
-                logger.warning(f"No equivalent found for {source_provider}:{source_type} in {target_provider}")
-            return instance
-        except sqlite3.Error as e:
-            logger.error(f"Database error finding equivalent instance: {e}")
+            return result[0] if result else None
+        except sqlite3.Error:
             return None
-        except Exception as e:
-            logger.error(f"Unexpected error finding equivalent instance: {e}")
+        except Exception:
             return None
     
     def find_nearest_region(self, source_provider: str, source_region: str,
