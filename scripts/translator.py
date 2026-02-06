@@ -19,13 +19,13 @@ logging.basicConfig(
 logger = logging.getLogger('translator')
 
 try:
-    from cloud_rosetta_db import CloudRosettaDB
+    from database_manager import CloudRosettaDB
 except ImportError:
-    logger.error("Failed to import CloudRosettaDB")
+    logger.error("Failed to import CloudRosettaDB from database_manager")
     sys.exit(1)
 
 
-class RosettaTranslatorV2:
+class RosettaTranslator:
     """Database-driven translator for Terraform plans between cloud providers"""
     
     def __init__(self, plan_data: Dict[str, Any], db_path: str = "cloud_rosetta.db"):

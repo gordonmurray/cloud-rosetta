@@ -25,14 +25,14 @@ When you run `rosetta --provider aws`, the tool first generates a Terraform plan
 def _generate_plan(self, tf_tool: str) -> str:
     # Generate binary plan file
     subprocess.run([tf_tool, "plan", "-out=tf.plan"])
-    
+
     # Convert to JSON format
     result = subprocess.run([tf_tool, "show", "-json", "tf.plan"])
-    
+
     # Save JSON plan
     with open("tfplan.json", 'w') as f:
         f.write(result.stdout)
-    
+
     return "tfplan.json"
 ```
 
@@ -46,11 +46,11 @@ if source_provider != target_provider:
     # Load the JSON plan
     with open(plan_file, 'r') as f:
         plan_data = json.load(f)
-    
+
     # Translate using database mappings
     translator = RosettaTranslator(plan_data, database_path)
     translated_plan = translator.translate(provider)
-    
+
     # Save translated JSON plan
     output_file = f"tfplan_{provider}.json"
     with open(output_file, 'w') as f:
@@ -188,10 +188,10 @@ tofu --version
 
 1. **"Infracost not found"**
    - Install from: https://www.infracost.io/docs/
-   
+
 2. **"Neither terraform nor tofu found"**
    - Install Terraform or OpenTofu
-   
+
 3. **Translation produces empty costs**
    - Check if resources are mapped in the database
    - Verify the JSON plan structure

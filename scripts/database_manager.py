@@ -409,29 +409,27 @@ class CloudRosettaDB:
     def map_resource_type(self, source_terraform_type: str, target_provider: str) -> Optional[str]:
         """Map a Terraform resource type to equivalent in target provider"""
         
-        # First get the resource category from source
-        self.cursor.execute("""
-            SELECT resource_category
-            FROM resource_types
-            WHERE terraform_type = ?
-        """, (source_terraform_type,))
-        
-        result = self.cursor.fetchone()
-        if not result:
+        # Map directly using resource_mappings table
+        if target_provider == "ovh":
+            self.cursor.execute("""
+                SELECT ovh_type
+                FROM resource_mappings
+                WHERE aws_type = ?
+            """, (source_terraform_type,))
+        elif target_provider == "hetzner":
+            self.cursor.execute("""
+                SELECT hetzner_type
+                FROM resource_mappings
+                WHERE aws_type = ?
+            """, (source_terraform_type,))
+        elif target_provider == "aws":
+            # If translating to AWS, return the original
+            return source_terraform_type
+        else:
             return None
         
-        category = result[0]
-        
-        # Find equivalent in target provider
-        self.cursor.execute("""
-            SELECT terraform_type
-            FROM resource_types
-            WHERE provider = ? AND resource_category = ?
-            LIMIT 1
-        """, (target_provider, category))
-        
         result = self.cursor.fetchone()
-        return result[0] if result else None
+        return result[0] if result and result[0] else None
     
     def get_providers(self) -> List[str]:
         """Get list of all providers in database"""

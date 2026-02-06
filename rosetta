@@ -229,12 +229,15 @@ ERROR: Could not download database. Please check:
         
         # Import translator
         try:
-            # Try to import from installed package
-            from rosetta_translator import RosettaTranslator
+            # Try to import from local scripts directory
+            script_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scripts')
+            if script_dir not in sys.path:
+                sys.path.insert(0, script_dir)
+            from translator import RosettaTranslator
         except ImportError:
-            # Fall back to local file
+            # Fall back to current directory
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-            from rosetta_translator_v2 import RosettaTranslatorV2 as RosettaTranslator
+            from translator import RosettaTranslator
         
         # Generate or use existing plan
         if not plan_file:
