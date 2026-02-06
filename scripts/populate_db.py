@@ -6,12 +6,15 @@ Populates the database with extensive AWS, OVH, and Hetzner resource mappings
 
 import sqlite3
 import json
+import os
 from datetime import datetime
 from typing import List, Tuple
 
 class ComprehensiveDBPopulator:
-    def __init__(self, db_path: str = "cloud_rosetta.db"):
+    def __init__(self, db_path: str = "db/cloud_rosetta.db"):
         self.db_path = db_path
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self.conn = sqlite3.connect(db_path)
         self.cursor = self.conn.cursor()
         self._extend_schema()
@@ -19,10 +22,29 @@ class ComprehensiveDBPopulator:
     def _extend_schema(self):
         """Extend schema with version tracking and more resource types"""
         try:
-            logger.debug("Extending database schema")
+            # Create instance_types table if it doesn't exist
+            self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS instance_types (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider TEXT NOT NULL,
+                instance_type TEXT NOT NULL,
+                vcpu INTEGER NOT NULL,
+                memory_gb REAL NOT NULL,
+                family TEXT,
+                generation TEXT,
+                network_performance TEXT,
+                storage_type TEXT,
+                storage_gb INTEGER,
+                gpu_count INTEGER DEFAULT 0,
+                gpu_type TEXT,
+                hourly_price REAL,
+                notes TEXT,
+                UNIQUE(provider, instance_type)
+            )
+            """)
             
             # Add version tracking table
-        self.cursor.execute("""
+            self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS db_version (
                 id INTEGER PRIMARY KEY,
                 version TEXT NOT NULL,
@@ -33,10 +55,10 @@ class ComprehensiveDBPopulator:
                 resource_count INTEGER,
                 notes TEXT
             )
-        """)
-        
-        # Extend resource_types table with more detailed mappings
-        self.cursor.execute("""
+            """)
+            
+            # Extend resource_types table with more detailed mappings
+            self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS resource_mappings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 aws_type TEXT,
@@ -46,11 +68,11 @@ class ComprehensiveDBPopulator:
                 subcategory TEXT,
                 notes TEXT,
                 UNIQUE(aws_type, ovh_type, hetzner_type)
-            )
-        """)
-        
-        # Add pricing history table
-        self.cursor.execute("""
+                )
+            """)
+            
+            # Add pricing history table
+            self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS pricing_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 provider TEXT NOT NULL,
@@ -61,10 +83,13 @@ class ComprehensiveDBPopulator:
                 currency TEXT DEFAULT 'USD',
                 effective_date DATE,
                 region TEXT
-            )
-        """)
-        
-        self.conn.commit()
+                )
+            """)
+            
+            self.conn.commit()
+        except Exception as e:
+            print(f"Error extending schema: {e}")
+            raise
     
     def populate_comprehensive_resources(self):
         """Populate all resource mappings"""
