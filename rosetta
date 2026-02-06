@@ -474,6 +474,9 @@ The database is automatically cached and updated daily from GitHub.
         logger.info("Operation cancelled by user")
         print("\nOperation cancelled by user", file=sys.stderr)
         sys.exit(130)
+    except SystemExit:
+        # Let sys.exit() calls pass through
+        raise
     except RuntimeError as e:
         logger.error(f"Runtime error: {e}")
         print(f"ERROR: {e}", file=sys.stderr)
