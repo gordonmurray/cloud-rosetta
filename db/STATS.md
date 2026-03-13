@@ -1,24 +1,24 @@
 # Cloud Rosetta Database Statistics
 
-**Generated:** 2026-03-12 03:06:27 UTC
-**Database Version:** 20260312.030627
-**Last Updated:** 2026-03-12 03:06:27
+**Generated:** 2026-03-13 03:04:50 UTC
+**Database Version:** 20260313.030450
+**Last Updated:** 2026-03-13 03:04:50
 
-## Resource Mappings: 2249
+## Resource Mappings: 2311
 
 ### By Category:
-- **Network**: 371 resources
-- **Database**: 360 resources
-- **Storage**: 327 resources
-- **Compute**: 182 resources
-- **Iam**: 180 resources
-- **Container**: 145 resources
-- **Serverless**: 144 resources
-- **Monitoring**: 144 resources
-- **Vpn**: 108 resources
-- **Messaging**: 108 resources
-- **Backup**: 108 resources
-- **Cdn**: 72 resources
+- **Network**: 381 resources
+- **Database**: 370 resources
+- **Storage**: 336 resources
+- **Compute**: 187 resources
+- **Iam**: 185 resources
+- **Container**: 149 resources
+- **Serverless**: 148 resources
+- **Monitoring**: 148 resources
+- **Vpn**: 111 resources
+- **Messaging**: 111 resources
+- **Backup**: 111 resources
+- **Cdn**: 74 resources
 
 ## Instance Types: 76
 
